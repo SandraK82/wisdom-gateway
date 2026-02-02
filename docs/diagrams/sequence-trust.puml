@@ -1,0 +1,129 @@
+@startuml sequence-trust
+!theme plain
+
+title Trust Model: Two Levels
+
+participant "MCP Client" as Client
+participant "Gateway" as Gateway
+database "Store" as DB
+
+== Level 1: TrustStore (Agent-to-Agent) ==
+
+note over Client
+  TrustStore is embedded in Agent
+  for efficient trust path finding.
+  
+  Used to answer:
+  "How much do I trust Agent X?"
+end note
+
+Client -> Gateway: GET /api/v1/agents/{my-uuid}
+activate Gateway
+Gateway -> DB: GetAgent(my-uuid)
+DB --> Gateway: Agent with TrustStore
+Gateway --> Client: 200 OK\n{agent}
+deactivate Gateway
+
+Client -> Client: my_trust_in_bob =\nagent.trust.GetTrustFor(bob_addr)
+note right of Client
+  Returns 0 if Bob not in TrustStore
+  Returns -1.0 to 1.0 otherwise
+end note
+
+== Level 2: TRUST Relation (Entity-level) ==
+
+note over Client
+  TRUST Relations express trust
+  in any entity (Fragment, Agent, etc.)
+  
+  Used to answer:
+  "What does Agent X think of Entity Y?"
+end note
+
+Client -> Gateway: GET /api/v1/relations?type=TRUST
+activate Gateway
+Gateway -> DB: ListRelations(type=TRUST)
+DB --> Gateway: [Relation, ...]
+Gateway --> Client: 200 OK\n[trust relations]
+deactivate Gateway
+
+Client -> Client: Find relations where:\nrelation.from == target_entity\nrelation.by == some_agent
+
+== Calculate Effective Trust ==
+
+note over Client
+  Combine both levels to calculate
+  effective trust in an entity:
+  
+  effective_trust(entity) =
+    Σ (my_trust[agent] × agent_trusts_entity)
+    
+  Where:
+  - my_trust[agent] from TrustStore
+  - agent_trusts_entity from TRUST Relations
+end note
+
+Client -> Gateway: GET /api/v1/agents/{my-uuid}
+Gateway --> Client: {my agent}
+
+Client -> Gateway: GET /api/v1/entities/{target}/relations
+Gateway --> Client: [relations for target]
+
+Client -> Client: Filter TRUST relations
+Client -> Client: For each TRUST relation:
+
+loop for each trust relation
+    Client -> Client: asserting_agent = relation.by
+    Client -> Client: my_trust = agent.trust.GetTrustFor(asserting_agent)
+    Client -> Client: their_trust = parse relation.content or 1.0
+    Client -> Client: weighted_trust += my_trust * their_trust
+end
+
+Client -> Client: normalize to [-1.0, 1.0]
+
+== Trust Path Finding ==
+
+note over Client
+  Find trust path to unknown agent
+  using BFS through TrustStore network
+end note
+
+Client -> Client: queue = [my_agent]
+Client -> Client: visited = {}
+Client -> Client: trust_map = {my_uuid: 1.0}
+
+loop while queue not empty
+    Client -> Client: current = queue.pop()
+    
+    alt current is target
+        Client -> Client: return trust_map[target]
+    end
+    
+    loop for each trust in current.Trust.Trusts
+        alt trust.Agent not in visited
+            Client -> Gateway: GET /api/v1/agents/{trust.Agent.Entity}
+            Gateway --> Client: {agent}
+            
+            Client -> Client: effective = trust_map[current] * trust.Trust
+            Client -> Client: trust_map[agent] = effective
+            Client -> Client: queue.append(agent)
+            Client -> Client: visited.add(agent)
+        end
+    end
+end
+
+Client -> Client: return 0 (not found)
+
+== Example: Rating Search Results ==
+
+Client -> Gateway: GET /api/v1/fragments?tags=golang
+Gateway --> Client: [fragment1, fragment2, fragment3]
+
+loop for each fragment
+    Client -> Client: Calculate effective_trust(fragment)
+end
+
+Client -> Client: Sort by effective_trust DESC
+Client -> Client: Display to user with trust indicators
+
+@enduml

@@ -1,0 +1,109 @@
+@startuml sequence-transforms
+!theme plain
+
+title Transform Management
+
+participant "MCP Client" as Client
+participant "Gateway" as Gateway
+database "Store" as DB
+
+note over Client, Gateway
+  Transforms define how to interpret
+  Fragment content. They specify
+  source and target formats.
+end note
+
+== Create Transform ==
+
+Client -> Client: Create Transform\n{uuid, name: "markdown-to-html",\n transform_from: "text/markdown",\n transform_to: "text/html",\n description: "Converts MD to HTML"}
+Client -> Client: Sign transform data
+
+Client -> Gateway: POST /api/v1/transforms\n{transform with signature}
+activate Gateway
+
+Gateway -> Gateway: Validate structure
+
+Gateway -> DB: CreateTransform(transform)
+alt UUID exists
+    DB --> Gateway: Conflict
+    Gateway --> Client: 409 Conflict
+else Success
+    DB --> Gateway: OK
+    Gateway --> Client: 201 Created\n{transform}
+end
+deactivate Gateway
+
+== Get Transform ==
+
+Client -> Gateway: GET /api/v1/transforms/{uuid}
+activate Gateway
+Gateway -> DB: GetTransform(uuid)
+alt Not found
+    DB --> Gateway: NotFoundError
+    Gateway --> Client: 404 Not Found
+else Found
+    DB --> Gateway: Transform
+    Gateway --> Client: 200 OK\n{transform}
+end
+deactivate Gateway
+
+== List Transforms ==
+
+Client -> Gateway: GET /api/v1/transforms?limit=50
+activate Gateway
+Gateway -> DB: ListTransforms(limit=50)
+DB --> Gateway: [Transform, ...]
+Gateway --> Client: 200 OK\n[transforms]
+deactivate Gateway
+
+== Use Transform in Fragment ==
+
+Client -> Gateway: GET /api/v1/transforms?name=markdown-to-html
+Gateway --> Client: [transform]
+
+Client -> Client: Create Fragment\n{content: "# Hello\n\nWorld",\n transform: {\n   domain: TRANSFORMATION,\n   entity: transform-uuid\n }}
+Client -> Client: Sign fragment
+
+Client -> Gateway: POST /api/v1/fragments\n{fragment}
+Gateway --> Client: 201 Created
+
+== Interpret Fragment Content ==
+
+Client -> Gateway: GET /api/v1/fragments/{uuid}
+Gateway --> Client: {fragment with transform address}
+
+Client -> Gateway: GET /api/v1/transforms/{transform-uuid}
+Gateway --> Client: {transform}
+
+Client -> Client: Apply transform:\nif transform.transform_from == "text/markdown"\n  and transform.transform_to == "text/html"\nthen convert(fragment.content)
+
+== Common Transforms ==
+
+note over Client, Gateway
+  Example transforms:
+  
+  text/plain → text/plain
+    (no transformation, raw text)
+  
+  text/markdown → text/html
+    (render markdown)
+  
+  application/json → text/plain
+    (pretty print JSON)
+  
+  text/code-go → text/html
+    (syntax highlight Go code)
+  
+  Custom transforms can include
+  additional_data for parameters.
+end note
+
+== Transform with Parameters ==
+
+Client -> Client: Create Transform\n{name: "syntax-highlight",\n transform_from: "text/code",\n transform_to: "text/html",\n additional_data: {\n   "theme": "monokai",\n   "line_numbers": true\n }}
+Client -> Client: Sign transform
+
+Client -> Gateway: POST /api/v1/transforms\n{transform}
+Gateway --> Client: 201 Created
+
+@enduml

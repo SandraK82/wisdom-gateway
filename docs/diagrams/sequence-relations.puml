@@ -1,0 +1,125 @@
+@startuml sequence-relations
+!theme plain
+
+title Relations: Content, Trust, and Typing
+
+participant "MCP Client" as Client
+participant "Gateway" as Gateway
+database "Store" as DB
+
+== Content Relation (Fragment to Fragment) ==
+
+note over Client
+  Relation types for content:
+  SUPPORTS, CONTRADICTS, EXTENDS,
+  SUPERSEDES, DERIVED_FROM, RELATED_TO,
+  EXAMPLE_OF
+end note
+
+Client -> Client: Create Relation\n{from: fragment-A,\n to: fragment-B,\n by: agent,\n type: SUPPORTS,\n content: "A provides evidence for B"}
+Client -> Client: Sign relation
+
+Client -> Gateway: POST /api/v1/relations
+activate Gateway
+Gateway -> Gateway: Validate addresses\nand relation type
+Gateway -> DB: CreateRelation
+DB --> Gateway: OK
+Gateway --> Client: 201 Created\n{relation}
+deactivate Gateway
+
+== Typing Relation (Self-Reference) ==
+
+note over Client
+  Typing relation types:
+  QUESTION, HYPOTHESE,
+  ANTITHESE, SYNTHESE
+  
+  To = empty or same as From
+end note
+
+Client -> Client: Create Relation\n{from: fragment-X,\n to: {},\n by: agent,\n type: HYPOTHESE}
+Client -> Client: Sign relation
+
+Client -> Gateway: POST /api/v1/relations
+activate Gateway
+Gateway -> DB: CreateRelation
+DB --> Gateway: OK
+Gateway --> Client: 201 Created\n{relation}
+deactivate Gateway
+
+== Trust Relation ==
+
+note over Client
+  TRUST relation expresses
+  agent's trust/distrust
+  in an entity (Fragment or Agent)
+end note
+
+Client -> Client: Create Relation\n{from: fragment-Y,\n to: {},\n by: agent,\n type: TRUST,\n content: "I verified this is correct"}
+Client -> Client: Sign relation
+
+Client -> Gateway: POST /api/v1/relations
+activate Gateway
+Gateway -> DB: CreateRelation
+DB --> Gateway: OK
+Gateway --> Client: 201 Created\n{relation}
+deactivate Gateway
+
+== Query Relations by Type ==
+
+Client -> Gateway: GET /api/v1/relations?type=TRUST
+activate Gateway
+Gateway -> DB: ListRelations(type=TRUST)
+DB --> Gateway: [Relation, ...]
+Gateway --> Client: 200 OK\n[relations]
+deactivate Gateway
+
+== Query Relations for Entity ==
+
+Client -> Gateway: GET /api/v1/entities/{addr}/relations
+activate Gateway
+Gateway -> DB: GetRelationsForEntity(addr)
+note right of DB
+  Searches both from_json
+  and to_json fields
+end note
+DB --> Gateway: [Relation, ...]
+Gateway --> Client: 200 OK\n[relations]
+deactivate Gateway
+
+== Build Trust Score (Client-side) ==
+
+Client -> Client: Load my Agent with TrustStore
+Client -> Gateway: GET /api/v1/relations?type=TRUST
+Gateway --> Client: [all TRUST relations]
+
+Client -> Client: For target entity:
+note right of Client
+  1. Find TRUST relations pointing to entity
+  2. For each relation:
+     - Get asserting agent (relation.by)
+     - Look up my trust in that agent
+     - Weight: my_trust * their_trust
+  3. Sum weighted trusts
+  4. Normalize to [-1.0, 1.0]
+end note
+
+Client -> Client: effective_trust =\nΣ(my_trust[agent] × agent_trusts_entity)
+
+== Refinement Relations ==
+
+note over Client
+  Refinement relation types:
+  SPECIALIZES, CLARIFIES, GENERALIZES
+end note
+
+Client -> Client: Create Relation\n{from: detailed-fragment,\n to: general-fragment,\n by: agent,\n type: SPECIALIZES}
+Client -> Client: Sign relation
+
+Client -> Gateway: POST /api/v1/relations
+activate Gateway
+Gateway -> DB: CreateRelation
+Gateway --> Client: 201 Created
+deactivate Gateway
+
+@enduml

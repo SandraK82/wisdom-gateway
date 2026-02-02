@@ -1,0 +1,123 @@
+@startuml sequence-tags
+!theme plain
+
+title Tag Management
+
+participant "MCP Client" as Client
+participant "Gateway" as Gateway
+database "Store" as DB
+
+== Create Tag ==
+
+Client -> Client: Create Tag\n{uuid, name: "golang",\n category: LANGUAGE,\n content: "Go programming language"}
+Client -> Client: Sign tag data
+
+Client -> Gateway: POST /api/v1/tags\n{tag with signature}
+activate Gateway
+
+Gateway -> Gateway: Validate structure\n(uuid, name, category required)
+
+Gateway -> DB: CreateTag(tag)
+
+alt Tag name already exists
+    DB --> Gateway: Conflict error
+    Gateway --> Client: 409 Conflict\n"Tag with this name exists"
+else Success
+    DB --> Gateway: OK
+    Gateway --> Client: 201 Created\n{tag}
+end
+deactivate Gateway
+
+== Get Tag by UUID ==
+
+Client -> Gateway: GET /api/v1/tags/{uuid}
+activate Gateway
+Gateway -> DB: GetTag(uuid)
+alt Not found
+    DB --> Gateway: NotFoundError
+    Gateway --> Client: 404 Not Found
+else Found
+    DB --> Gateway: Tag
+    Gateway --> Client: 200 OK\n{tag}
+end
+deactivate Gateway
+
+== Get Tag by Name ==
+
+Client -> Gateway: GET /api/v1/tags/by-name/{name}
+activate Gateway
+Gateway -> DB: GetTagByName(name)
+alt Not found
+    DB --> Gateway: NotFoundError
+    Gateway --> Client: 404 Not Found
+else Found
+    DB --> Gateway: Tag
+    Gateway --> Client: 200 OK\n{tag}
+end
+deactivate Gateway
+
+== List Tags ==
+
+Client -> Gateway: GET /api/v1/tags?limit=50
+activate Gateway
+Gateway -> DB: ListTags(limit=50)
+DB --> Gateway: [Tag, ...]
+Gateway --> Client: 200 OK\n[tags]
+deactivate Gateway
+
+== Filter Tags by Category ==
+
+Client -> Gateway: GET /api/v1/tags?category=LANGUAGE
+activate Gateway
+Gateway -> DB: ListTags(category=LANGUAGE)
+DB --> Gateway: [Tag, ...]
+Gateway --> Client: 200 OK\n[language tags]
+deactivate Gateway
+
+== Search Tags ==
+
+Client -> Gateway: GET /api/v1/tags?search=python
+activate Gateway
+Gateway -> DB: ListTags(search="python")
+note right of DB
+  Searches in name
+  and content fields
+end note
+DB --> Gateway: [Tag, ...]
+Gateway --> Client: 200 OK\n[matching tags]
+deactivate Gateway
+
+== Use Tags in Fragment ==
+
+Client -> Gateway: GET /api/v1/tags/by-name/golang
+Gateway --> Client: {tag with uuid}
+
+Client -> Gateway: GET /api/v1/tags/by-name/concurrency
+Gateway --> Client: {tag with uuid}
+
+Client -> Client: Create Fragment\n{tags: [\n  {domain: TAG, entity: golang-uuid},\n  {domain: TAG, entity: concurrency-uuid}\n],\n content: "Go channels for concurrency..."}
+Client -> Client: Sign fragment
+
+Client -> Gateway: POST /api/v1/fragments\n{fragment}
+Gateway -> DB: CreateFragment
+Gateway --> Client: 201 Created
+
+== Tag Categories ==
+
+note over Client, Gateway
+  Available Tag Categories:
+  
+  PLATFORM     - macos, linux, windows
+  LANGUAGE     - go, python, rust, java
+  FRAMEWORK    - react, django, rails
+  LIBRARY      - lodash, numpy
+  VERSION      - v1.0, 2024-Q1
+  DOMAIN       - finance, healthcare
+  TYPE         - tutorial, reference, api
+  ENVIRONMENT  - production, development
+  ARCHITECTURE - microservices, monolith
+  COUNTRY      - de, us, jp
+  FIELD        - physics, biology, cs
+end note
+
+@enduml

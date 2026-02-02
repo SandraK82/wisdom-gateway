@@ -1,0 +1,241 @@
+@startuml shared-wisdom-class-diagram
+!theme plain
+skinparam linetype ortho
+skinparam classAttributeIconSize 0
+skinparam classFontSize 12
+skinparam classAttributeFontSize 10
+skinparam packageStyle rectangle
+
+title Shared-Wisdom Data Model (Simplified)
+
+' ============================================================================
+' ENUMS
+' ============================================================================
+
+enum AddressDomain {
+  AGENT
+  TAG
+  FRAGMENT
+  RELATION
+  TRANSFORMATION
+  HUB
+}
+
+enum RelationType {
+  ' Trust
+  TRUST
+  ' Content relationships
+  SUPPORTS
+  CONTRADICTS
+  EXTENDS
+  SUPERSEDES
+  DERIVED_FROM
+  RELATED_TO
+  EXAMPLE_OF
+  ' Typing (self-reference)
+  QUESTION
+  HYPOTHESE
+  ANTITHESE
+  SYNTHESE
+  ' Refinement
+  SPECIALIZES
+  CLARIFIES
+  GENERALIZES
+}
+
+enum TagCategory {
+  PLATFORM
+  LANGUAGE
+  FRAMEWORK
+  LIBRARY
+  VERSION
+  DOMAIN
+  TYPE
+  ENVIRONMENT
+  ARCHITECTURE
+  COUNTRY
+  FIELD
+}
+
+' ============================================================================
+' VALUE OBJECTS
+' ============================================================================
+
+package "Value Objects" #LightYellow {
+
+  class Address <<value>> {
+    +server_port: string
+    +domain: AddressDomain
+    +entity: string
+    --
+    +String(): string
+    +IsEmpty(): bool
+    +IsLocal(): bool
+    +Validate(): error
+  }
+
+  class Trust <<value>> {
+    +agent: Address
+    +trust: float32 [-1.0..1.0]
+  }
+
+  class TrustStore <<value>> {
+    +num_trusts: uint64
+    +trusts: Trust[]
+  }
+}
+
+' ============================================================================
+' FEDERATED ENTITIES (Immutable, Signed)
+' ============================================================================
+
+package "Federated Entities (Immutable)" #LightBlue {
+
+  class Agent <<signed>> {
+    +uuid: string {PK}
+    +public_key: string {unique}
+    +version: uint32
+    +description: string
+    +trust: TrustStore
+    +primary_hub: Address
+    --
+    +signature: string
+  }
+
+  class Fragment <<signed>> {
+    +uuid: string {PK}
+    +tags: Address[]
+    +transform: Address
+    +content: string
+    +creator: Address
+    +when: datetime
+    --
+    +signature: string
+  }
+
+  class Relation <<signed>> {
+    +uuid: string {PK}
+    +from: Address {required}
+    +to: Address {optional}
+    +by: Address {agent}
+    +type: RelationType
+    +content: string
+    +creator: Address
+    +when: datetime
+    --
+    +signature: string
+  }
+
+  class Tag <<signed>> {
+    +uuid: string {PK}
+    +name: string {unique}
+    +content: string
+    +version: uint32
+    +category: TagCategory
+    +creator: Address
+    --
+    +signature: string
+  }
+
+  class Transform <<signed>> {
+    +uuid: string {PK}
+    +name: string
+    +description: string
+    +tags: Address[]
+    +transform_to: string
+    +transform_from: string
+    +additional_data: string
+    +agent: Address
+    +version: uint32
+    --
+    +signature: string
+  }
+}
+
+' ============================================================================
+' LOCAL ENTITIES (Mutable, Gateway-specific)
+' ============================================================================
+
+package "Local Entities (Mutable)" #LightGreen {
+
+  class Session {
+    +id: string {PK}
+    +agent_uuid: string {FK}
+    +created_at: datetime
+    +expires_at: datetime
+    +last_used: datetime
+  }
+
+  class AuthChallenge {
+    +id: string {PK}
+    +agent_uuid: string {FK}
+    +challenge: string
+    +created_at: datetime
+    +expires_at: datetime
+  }
+
+  class Project {
+    +id: string {PK}
+    +name: string
+    +description: string
+    +agent_uuid: string {FK}
+    +tags: string[]
+    +created_at: datetime
+    +updated_at: datetime
+  }
+}
+
+' ============================================================================
+' RELATIONSHIPS
+' ============================================================================
+
+' Agent relationships
+Agent "1" *-- "1" TrustStore : embeds
+TrustStore "1" *-- "*" Trust : contains
+Trust "*" --> "1" Agent : references
+
+Agent "1" -- "*" Fragment : creates
+Agent "1" -- "*" Relation : asserts
+Agent "1" -- "*" Tag : creates
+Agent "1" -- "*" Transform : creates
+
+' Fragment relationships
+Fragment "*" --> "*" Tag : tagged with
+Fragment "*" --> "0..1" Transform : uses
+Fragment "*" --> "1" Agent : created by
+
+' Relation relationships
+Relation "*" --> "*" Fragment : from/to
+Relation "*" --> "1" Agent : by
+
+' Local relationships
+Session "*" --> "1" Agent : authenticates
+AuthChallenge "*" --> "1" Agent : challenges
+Project "*" --> "1" Agent : owned by
+
+' Notes
+note right of Agent
+  TrustStore is embedded
+  for efficient trust
+  path calculations
+end note
+
+note right of Fragment
+  No Type/State fields!
+  Use Relations for:
+  - QUESTION
+  - HYPOTHESE
+  - etc.
+end note
+
+note right of Relation
+  Self-reference (to empty)
+  for typing fragments
+end note
+
+note bottom of Transform
+  Defines how to interpret
+  Fragment.content
+end note
+
+@enduml

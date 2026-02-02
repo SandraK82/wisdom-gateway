@@ -1,0 +1,87 @@
+@startuml sequence-auth
+!theme plain
+
+title Authentication Flow (Challenge-Response)
+
+participant "MCP Client" as Client
+participant "Gateway" as Gateway
+database "Store" as DB
+
+== Request Challenge ==
+
+Client -> Gateway: POST /api/v1/auth/challenge\n{agent_uuid}
+activate Gateway
+
+Gateway -> DB: GetAgent(agent_uuid)
+DB --> Gateway: Agent
+
+alt Agent not found
+    Gateway --> Client: 404 Not Found
+else Agent exists
+    Gateway -> Gateway: Generate random challenge (32 bytes)
+    Gateway -> DB: CreateAuthChallenge(\n  id, agent_uuid, challenge,\n  expires_at = now + 5min)
+    DB --> Gateway: OK
+    Gateway --> Client: 201 Created\n{challenge_id, challenge, expires_at}
+end
+deactivate Gateway
+
+== Sign Challenge (Client-side) ==
+
+Client -> Client: Sign challenge with\nagent's private key
+
+== Verify Challenge ==
+
+Client -> Gateway: POST /api/v1/auth/verify\n{challenge_id, signature}
+activate Gateway
+
+Gateway -> DB: GetAuthChallenge(challenge_id)
+DB --> Gateway: AuthChallenge
+
+alt Challenge not found
+    Gateway --> Client: 404 Not Found
+else Challenge expired
+    Gateway -> DB: DeleteAuthChallenge(challenge_id)
+    Gateway --> Client: 401 Unauthorized\n"Challenge expired"
+else Challenge valid
+    note over Gateway
+        Gateway does NOT verify signature!
+        MCP Client is trusted to have signed correctly.
+        Verification happens when reading data.
+    end note
+    
+    Gateway -> DB: DeleteAuthChallenge(challenge_id)
+    Gateway -> Gateway: Create session\n(id, expires = now + 24h)
+    Gateway -> DB: CreateSession(session)
+    DB --> Gateway: OK
+    Gateway --> Client: 200 OK\n{session_id, expires_at}
+end
+deactivate Gateway
+
+== Using Session ==
+
+Client -> Gateway: GET /api/v1/fragments\nHeader: X-Session-ID: {session_id}
+activate Gateway
+
+Gateway -> DB: GetSession(session_id)
+DB --> Gateway: Session
+
+alt Session not found or expired
+    Gateway --> Client: 401 Unauthorized
+else Session valid
+    Gateway -> DB: UpdateSessionLastUsed(session_id)
+    Gateway -> DB: Query fragments...
+    DB --> Gateway: Fragments
+    Gateway --> Client: 200 OK\n[fragments]
+end
+deactivate Gateway
+
+== Logout ==
+
+Client -> Gateway: DELETE /api/v1/sessions/{session_id}
+activate Gateway
+Gateway -> DB: DeleteSession(session_id)
+DB --> Gateway: OK
+Gateway --> Client: 204 No Content
+deactivate Gateway
+
+@enduml

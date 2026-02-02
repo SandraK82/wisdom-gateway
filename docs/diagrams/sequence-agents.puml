@@ -1,0 +1,138 @@
+@startuml sequence-agents
+!theme plain
+
+title Agent Management
+
+participant "MCP Client" as Client
+participant "Gateway" as Gateway
+database "Store" as DB
+
+== Register New Agent ==
+
+Client -> Client: Generate key pair\n(public_key, private_key)
+Client -> Client: Create Agent\n{uuid, public_key, description,\n trust: {num_trusts: 0, trusts: []},\n primary_hub: this-gateway}
+Client -> Client: Sign agent data
+
+Client -> Gateway: POST /api/v1/agents\n{agent with signature}
+activate Gateway
+
+Gateway -> Gateway: Validate structure\n(uuid, public_key, signature required)
+
+Gateway -> DB: CreateAgent(agent)
+
+alt Public key already exists
+    DB --> Gateway: Conflict error
+    Gateway --> Client: 409 Conflict\n"Agent with this public key exists"
+else UUID already exists
+    DB --> Gateway: Conflict error
+    Gateway --> Client: 409 Conflict\n"Agent already exists"
+else Success
+    DB --> Gateway: OK
+    Gateway --> Client: 201 Created\n{agent}
+end
+deactivate Gateway
+
+== Get Agent ==
+
+Client -> Gateway: GET /api/v1/agents/{uuid}
+activate Gateway
+Gateway -> DB: GetAgent(uuid)
+alt Not found
+    DB --> Gateway: NotFoundError
+    Gateway --> Client: 404 Not Found
+else Found
+    DB --> Gateway: Agent
+    Gateway --> Client: 200 OK\n{agent with trust store}
+end
+deactivate Gateway
+
+== List Agents ==
+
+Client -> Gateway: GET /api/v1/agents?limit=20&offset=0
+activate Gateway
+Gateway -> DB: ListAgents(limit=20, offset=0)
+DB --> Gateway: [Agent, ...]
+Gateway --> Client: 200 OK\n[agents]
+deactivate Gateway
+
+== Trust Another Agent ==
+
+note over Client
+  Trust is stored in two ways:
+  1. TrustStore embedded in Agent
+     (for path-finding)
+  2. TRUST Relation
+     (for entity-level trust)
+end note
+
+Client -> Client: To update TrustStore:\nCreate new Agent version with\nupdated trust.trusts[]
+
+note right of Client
+  Agent is immutable!
+  "Updating" trust means creating
+  a new Agent with higher version
+  and new signature.
+  
+  Old agent remains in store.
+  Clients use highest version.
+end note
+
+Client -> Client: agent.version++
+Client -> Client: agent.trust.trusts.append(\n  {agent: other-agent, trust: 0.8})
+Client -> Client: Sign new agent data
+
+Client -> Gateway: POST /api/v1/agents\n{agent v2}
+Gateway -> DB: CreateAgent(agent v2)
+note right of DB
+  Different UUID or same UUID?
+  Design decision:
+  - Same UUID: reject (immutable)
+  - New UUID: accept (new version)
+  
+  Current: New UUID required
+end note
+Gateway --> Client: 201 Created
+
+== Query Trust Path (Client-side) ==
+
+Client -> Gateway: GET /api/v1/agents/{my-uuid}
+Gateway --> Client: {my agent with TrustStore}
+
+Client -> Client: BFS/DFS through trust graph:
+note right of Client
+  1. Start with my direct trusts
+  2. For each trusted agent:
+     - Fetch their Agent
+     - Check their TrustStore
+     - Decay trust by distance
+  3. Find path to target agent
+  4. Calculate effective trust
+end note
+
+loop until target found or max depth
+    Client -> Gateway: GET /api/v1/agents/{next-agent}
+    Gateway --> Client: {agent with TrustStore}
+    Client -> Client: Process trust relationships
+end
+
+== Agent Lookup by Public Key ==
+
+note over Client
+  Useful when verifying signatures -
+  you have the public key but need
+  the agent metadata
+end note
+
+Client -> Gateway: GET /api/v1/agents?public_key={key}
+activate Gateway
+Gateway -> DB: GetAgentByPublicKey(key)
+alt Not found
+    DB --> Gateway: NotFoundError
+    Gateway --> Client: 404 Not Found
+else Found
+    DB --> Gateway: Agent
+    Gateway --> Client: 200 OK\n{agent}
+end
+deactivate Gateway
+
+@enduml

@@ -1,0 +1,131 @@
+@startuml sequence-federation
+!theme plain
+
+title Federation Protocol (Future)
+
+participant "Hub A" as HubA
+participant "Hub B" as HubB
+participant "MCP Client" as Client
+
+note over HubA, HubB
+  Federation enables hubs to:
+  - Discover new content
+  - Replicate relevant knowledge
+  - Resolve remote addresses
+  
+  This is a FUTURE feature.
+end note
+
+== Address Resolution ==
+
+Client -> HubA: GET /api/v1/fragments/{uuid}
+activate HubA
+HubA -> HubA: Fragment not found locally
+HubA --> Client: 404 Not Found
+deactivate HubA
+
+note over Client
+  Client has remote address:
+  hubB.example.com:8443/FRAGMENT/xyz
+end note
+
+Client -> HubB: GET /api/v1/fragments/xyz
+activate HubB
+HubB -> HubB: Find fragment
+HubB --> Client: 200 OK\n{fragment}
+deactivate HubB
+
+Client -> Client: Verify signature
+Client -> Client: Cache locally (optional)
+
+== Sync Changes ==
+
+HubA -> HubB: GET /federation/changes\n?since=2024-01-01T00:00:00Z
+activate HubB
+HubB -> HubB: Query entities\ncreated after timestamp
+HubB --> HubA: 200 OK\n[{type: "fragment", entity: {...}},\n {type: "relation", entity: {...}},\n ...]
+deactivate HubB
+
+loop for each entity
+    HubA -> HubA: Verify signature
+    alt Signature valid
+        HubA -> HubA: Store entity locally
+    else Signature invalid
+        HubA -> HubA: Log and skip
+    end
+end
+
+== Discovery via Trust Network ==
+
+note over Client
+  Find relevant hubs through
+  trusted agents' primary_hub
+end note
+
+Client -> HubA: GET /api/v1/agents/{my-uuid}
+HubA --> Client: {agent with TrustStore}
+
+loop for each trusted agent
+    Client -> Client: Check agent.primary_hub
+    alt Different hub
+        Client -> Client: Add to known hubs
+    end
+end
+
+Client -> HubB: GET /api/v1/fragments\n?tags=golang
+HubB --> Client: [fragments from Hub B]
+
+== Federated Search (Future) ==
+
+Client -> HubA: GET /federation/search\n?query=golang+concurrency
+activate HubA
+
+par Query local and federate
+    HubA -> HubA: Search local
+and
+    HubA -> HubB: GET /federation/search?query=...
+    HubB --> HubA: [results]
+end
+
+HubA -> HubA: Merge and deduplicate
+HubA --> Client: 200 OK\n[merged results]
+deactivate HubA
+
+== Hub Registration ==
+
+note over HubA, HubB
+  Hubs can register with each other
+  to enable automatic sync.
+end note
+
+HubA -> HubB: POST /federation/register\n{hub_address: "hubA.example.com:8443",\n public_key: "..."}
+activate HubB
+HubB -> HubB: Verify hub identity
+HubB -> HubB: Add to known hubs
+HubB --> HubA: 200 OK\n{registered: true}
+deactivate HubB
+
+== Trust-Weighted Replication ==
+
+note over HubA
+  Replicate content from hubs
+  whose agents I trust.
+  
+  Higher trust = more replication
+  Lower trust = selective replication
+end note
+
+HubA -> HubA: For each known hub:
+HubA -> HubA: Calculate aggregate trust\nfrom my agents' TrustStores
+
+alt High trust hub
+    HubA -> HubB: GET /federation/changes?since=...&full=true
+    HubB --> HubA: [all new entities]
+else Medium trust hub
+    HubA -> HubB: GET /federation/changes?since=...&verified_only=true
+    HubB --> HubA: [verified entities only]
+else Low trust hub
+    HubA -> HubA: On-demand resolution only
+end
+
+@enduml

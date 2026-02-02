@@ -1,0 +1,21 @@
+# Build
+/bin/
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+go.sum
+
+# Data
+*.db
+*.db-*
+gateway.db*

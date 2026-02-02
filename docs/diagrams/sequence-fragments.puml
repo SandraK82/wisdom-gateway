@@ -1,0 +1,115 @@
+@startuml sequence-fragments
+!theme plain
+
+title Fragment Lifecycle
+
+participant "MCP Client" as Client
+participant "Gateway" as Gateway
+database "Store" as DB
+
+== Create Fragment ==
+
+Client -> Client: Create Fragment object\n{uuid, tags, content, creator, when}
+Client -> Client: Sign fragment with\nagent's private key
+
+Client -> Gateway: POST /api/v1/fragments\n{fragment with signature}
+activate Gateway
+
+Gateway -> Gateway: Validate structure\n(required fields, address formats)
+
+alt Validation failed
+    Gateway --> Client: 400 Bad Request\n{validation errors}
+else Validation OK
+    Gateway -> DB: CreateFragment(fragment)
+    
+    alt UUID already exists
+        DB --> Gateway: Conflict error
+        Gateway --> Client: 409 Conflict\n"Fragment already exists"
+    else Success
+        DB --> Gateway: OK
+        Gateway --> Client: 201 Created\n{fragment}
+    end
+end
+deactivate Gateway
+
+== Type Fragment via Relation ==
+
+note over Client
+  Fragments have no Type field.
+  Typing is done via Relations.
+end note
+
+Client -> Client: Create Relation\n{from: fragment, to: empty,\n by: agent, type: QUESTION}
+Client -> Client: Sign relation
+
+Client -> Gateway: POST /api/v1/relations\n{relation}
+activate Gateway
+Gateway -> DB: CreateRelation(relation)
+DB --> Gateway: OK
+Gateway --> Client: 201 Created\n{relation}
+deactivate Gateway
+
+== Query Fragments ==
+
+Client -> Gateway: GET /api/v1/fragments?limit=10
+activate Gateway
+Gateway -> DB: ListFragments(limit=10)
+DB --> Gateway: [Fragment, ...]
+Gateway --> Client: 200 OK\n[fragments]
+deactivate Gateway
+
+== Query Fragments by Type ==
+
+Client -> Gateway: GET /api/v1/relations?type=QUESTION
+activate Gateway
+Gateway -> DB: ListRelations(type=QUESTION)
+DB --> Gateway: [Relation, ...]
+Gateway --> Client: 200 OK\n[relations with fragment addresses]
+deactivate Gateway
+
+Client -> Client: Extract fragment UUIDs\nfrom relation.from
+
+loop for each fragment UUID
+    Client -> Gateway: GET /api/v1/fragments/{uuid}
+    Gateway -> DB: GetFragment(uuid)
+    DB --> Gateway: Fragment
+    Gateway --> Client: 200 OK\n{fragment}
+end
+
+== Verify Fragment Signature (Client-side) ==
+
+Client -> Client: Get creator's public key\n(from Agent)
+Client -> Client: Verify signature over\nfragment data
+Client -> Client: Accept or reject\nbased on verification
+
+== Immutability ==
+
+Client -> Gateway: PUT /api/v1/fragments/{uuid}\n{modified content}
+activate Gateway
+Gateway --> Client: 404 Not Found\n(route does not exist)
+deactivate Gateway
+
+note over Client, Gateway
+  Federated entities are immutable.
+  PUT and DELETE routes do not exist.
+  To "update", create a new Fragment
+  with a SUPERSEDES relation.
+end note
+
+== Superseding a Fragment ==
+
+Client -> Client: Create new Fragment\n{uuid: new-uuid, content: updated}
+Client -> Client: Sign fragment
+
+Client -> Gateway: POST /api/v1/fragments\n{new fragment}
+Gateway -> DB: CreateFragment
+Gateway --> Client: 201 Created
+
+Client -> Client: Create Relation\n{from: new-fragment,\n to: old-fragment,\n type: SUPERSEDES}
+Client -> Client: Sign relation
+
+Client -> Gateway: POST /api/v1/relations\n{supersedes relation}
+Gateway -> DB: CreateRelation
+Gateway --> Client: 201 Created
+
+@enduml

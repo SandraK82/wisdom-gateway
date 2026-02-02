@@ -1,0 +1,115 @@
+@startuml sequence-projects
+!theme plain
+
+title Project Management (Local/Mutable)
+
+participant "MCP Client" as Client
+participant "Gateway" as Gateway
+database "Store" as DB
+
+note over Client, Gateway
+  Projects are LOCAL entities.
+  They exist only on this gateway
+  and are MUTABLE (can be updated/deleted).
+  
+  Projects help organize work context
+  for the MCP client.
+end note
+
+== Create Project ==
+
+Client -> Gateway: POST /api/v1/projects\n{name: "My Go Project",\n description: "Learning Go",\n agent_uuid: "my-agent",\n tags: ["golang-uuid", "tutorial-uuid"]}
+activate Gateway
+
+Gateway -> Gateway: Generate project ID
+Gateway -> Gateway: Set created_at, updated_at
+
+Gateway -> DB: CreateProject(project)
+DB --> Gateway: OK
+Gateway --> Client: 201 Created\n{project with id}
+deactivate Gateway
+
+== List Projects ==
+
+Client -> Gateway: GET /api/v1/projects?agent_uuid={my-uuid}
+activate Gateway
+Gateway -> DB: ListProjects(agent_uuid)
+DB --> Gateway: [Project, ...]
+Gateway --> Client: 200 OK\n[projects]
+deactivate Gateway
+
+== Get Project ==
+
+Client -> Gateway: GET /api/v1/projects/{project-id}
+activate Gateway
+Gateway -> DB: GetProject(id)
+alt Not found
+    DB --> Gateway: NotFoundError
+    Gateway --> Client: 404 Not Found
+else Found
+    DB --> Gateway: Project
+    Gateway --> Client: 200 OK\n{project}
+end
+deactivate Gateway
+
+== Update Project ==
+
+Client -> Gateway: PUT /api/v1/projects/{project-id}\n{name: "My Go Project (Updated)",\n description: "Advanced Go",\n tags: ["golang-uuid", "advanced-uuid"]}
+activate Gateway
+
+Gateway -> DB: UpdateProject(project)
+note right of DB
+  Updates: name, description, tags
+  Auto-updates: updated_at
+end note
+
+alt Not found
+    DB --> Gateway: NotFoundError
+    Gateway --> Client: 404 Not Found
+else Success
+    DB --> Gateway: OK
+    Gateway --> Client: 200 OK\n{updated project}
+end
+deactivate Gateway
+
+== Delete Project ==
+
+Client -> Gateway: DELETE /api/v1/projects/{project-id}
+activate Gateway
+Gateway -> DB: DeleteProject(id)
+DB --> Gateway: OK
+Gateway --> Client: 204 No Content
+deactivate Gateway
+
+== Using Project Context ==
+
+note over Client
+  Projects provide context for:
+  - Default tags when creating fragments
+  - Filtering queries to relevant content
+  - Organizing work sessions
+end note
+
+Client -> Gateway: GET /api/v1/projects/{project-id}
+Gateway --> Client: {project with default tags}
+
+Client -> Client: Create Fragment with\nproject's default tags
+
+Client -> Gateway: POST /api/v1/fragments\n{fragment with project tags}
+Gateway --> Client: 201 Created
+
+== Project vs Session ==
+
+note over Client, Gateway
+  Project: Long-lived work context
+  - Persists across sessions
+  - Contains metadata, default tags
+  - Helps organize knowledge
+  
+  Session: Authentication state
+  - Expires after 24 hours
+  - Tracks last activity
+  - Required for authenticated requests
+end note
+
+@enduml
