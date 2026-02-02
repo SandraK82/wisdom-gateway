@@ -16,19 +16,16 @@ const (
 	RelationExtends     RelationType = "EXTENDS"      // From extends To
 	RelationSupersedes  RelationType = "SUPERSEDES"   // From supersedes To
 	RelationDerivedFrom RelationType = "DERIVED_FROM" // From is derived from To
-	RelationRelatedTo   RelationType = "RELATED_TO"   // Generic relation
+	RelationRelatedTo   RelationType = "RELATED_TO"   // Generic relation (also used for tag application)
 	RelationExampleOf   RelationType = "EXAMPLE_OF"   // From is an example of To
-
-	// Fragment typing (self-reference: From = To)
-	RelationQuestion  RelationType = "QUESTION"  // Fragment is a question
-	RelationHypothese RelationType = "HYPOTHESE" // Fragment is a hypothesis
-	RelationAntithese RelationType = "ANTITHESE" // Fragment is an antithesis
-	RelationSynthese  RelationType = "SYNTHESE"  // Fragment is a synthesis
 
 	// Refinement relations
 	RelationSpecializes RelationType = "SPECIALIZES" // From specializes To
 	RelationClarifies   RelationType = "CLARIFIES"   // From clarifies To
 	RelationGeneralizes RelationType = "GENERALIZES" // From generalizes To
+
+	// Note: Fragment typing (QUESTION, HYPOTHESIS, etc.) now uses TYPE tags
+	// instead of self-referencing relations. See wisdom_type_fragment tool.
 )
 
 // Relation represents a relationship between entities in the network.
@@ -41,9 +38,11 @@ type Relation struct {
 	Type       RelationType `json:"type"`       // Type of relationship
 	Content    string       `json:"content"`    // Optional: reasoning/explanation
 	Creator    Address      `json:"creator"`    // Agent who created this relation
+	Version    uint32       `json:"version"`    // Incremented on updates
 	When       time.Time    `json:"when"`       // Creation timestamp
 	Signature  string       `json:"signature"`  // Signature over the relation data
 	Confidence float32      `json:"confidence"` // Strength of relationship (0.0 to 1.0)
+	CreatedAt  time.Time    `json:"created_at"` // Database creation timestamp
 }
 
 // Validate checks if the Relation data is well-formed.
@@ -58,7 +57,7 @@ func (r *Relation) Validate() error {
 		return NewValidationError("relation", "invalid from: %v", err)
 	}
 	
-	// To is optional (for self-referencing relations like QUESTION)
+	// To is optional for certain relation types
 	if !r.To.IsEmpty() {
 		if err := r.To.Validate(); err != nil {
 			return NewValidationError("relation", "invalid to: %v", err)
@@ -110,7 +109,6 @@ func isValidRelationType(rt RelationType) bool {
 	case RelationTrust,
 		RelationSupports, RelationContradicts, RelationExtends, RelationSupersedes,
 		RelationDerivedFrom, RelationRelatedTo, RelationExampleOf,
-		RelationQuestion, RelationHypothese, RelationAntithese, RelationSynthese,
 		RelationSpecializes, RelationClarifies, RelationGeneralizes:
 		return true
 	}
@@ -123,7 +121,6 @@ func ValidRelationTypes() []RelationType {
 		RelationTrust,
 		RelationSupports, RelationContradicts, RelationExtends, RelationSupersedes,
 		RelationDerivedFrom, RelationRelatedTo, RelationExampleOf,
-		RelationQuestion, RelationHypothese, RelationAntithese, RelationSynthese,
 		RelationSpecializes, RelationClarifies, RelationGeneralizes,
 	}
 }
