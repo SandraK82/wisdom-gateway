@@ -1,18 +1,21 @@
 package models
 
+import "time"
+
 // Transform defines how content is transformed between formats.
 // This is used to interpret fragment content consistently.
 type Transform struct {
 	UUID           string    `json:"uuid"`
-	Name           string    `json:"name"`           // Human-readable name
-	Description    string    `json:"description"`    // What this transform does
-	Tags           []Address `json:"tags"`           // Related tags
-	TransformTo    string    `json:"transform_to"`   // Target format (e.g., "text/markdown")
-	TransformFrom  string    `json:"transform_from"` // Source format (e.g., "text/plain")
+	Name           string    `json:"name"`            // Human-readable name
+	Description    string    `json:"description"`     // What this transform does
+	Tags           []Address `json:"tags"`            // Related tags
+	TransformTo    string    `json:"transform_to"`    // Target format (e.g., "text/markdown")
+	TransformFrom  string    `json:"transform_from"`  // Source format (e.g., "text/plain")
 	AdditionalData string    `json:"additional_data"` // JSON with extra configuration
-	Agent          Address   `json:"agent"`          // Agent who created this transform
-	Version        uint32    `json:"version"`        // Incremented on updates
-	Signature      string    `json:"signature"`      // Signature over the transform data
+	Agent          Address   `json:"agent"`           // Agent who created this transform
+	Version        uint32    `json:"version"`         // Incremented on updates
+	Signature      string    `json:"signature"`       // Signature over the transform data
+	CreatedAt      time.Time `json:"created_at"`      // Database creation timestamp
 }
 
 // Validate checks if the Transform data is well-formed.

@@ -3,12 +3,14 @@ package api
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thoughtracker/shared-wisdom/internal/crypto"
 	"github.com/thoughtracker/shared-wisdom/internal/models"
 	"github.com/thoughtracker/shared-wisdom/internal/store"
 )
@@ -16,16 +18,6 @@ import (
 // Agent handlers
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
-	// Check if hub is at critical level - reject new agents
-	if s.hubStatus != nil && s.hubStatus.IsCritical() {
-		msg := "Hub at capacity. New agents not accepted."
-		if s.hubStatus.Hint != "" {
-			msg += " " + s.hubStatus.Hint
-		}
-		writeErrorWithStatus(w, http.StatusServiceUnavailable, msg, s.hubStatus)
-		return
-	}
-
 	var agent models.Agent
 	if err := parseJSON(r, &agent); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
@@ -35,6 +27,17 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if err := agent.Validate(); err != nil {
 		handleError(w, err)
 		return
+	}
+
+	// Agents are always synced to hub
+	if s.syncer != nil {
+		hubAgent, err := s.syncer.Client().PushAgent(r.Context(), &agent)
+		if err != nil {
+			log.Printf("Warning: failed to sync agent to hub: %v", err)
+			// Continue with local storage
+		} else {
+			agent = *hubAgent
+		}
 	}
 
 	if err := s.store.CreateAgent(r.Context(), &agent); err != nil {
@@ -58,6 +61,7 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	opts := store.ListOptions{
 		Limit:  parseIntParam(r, "limit", 100),
 		Offset: parseIntParam(r, "offset", 0),
+		Cursor: r.URL.Query().Get("cursor"),
 	}
 
 	agents, err := s.store.ListAgents(r.Context(), opts)
@@ -65,7 +69,17 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		handleError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, agents)
+
+	// Determine next cursor (UUID of last item if we have a full page)
+	var nextCursor string
+	if len(agents) == opts.Limit && len(agents) > 0 {
+		nextCursor = agents[len(agents)-1].UUID
+	}
+
+	writeJSON(w, http.StatusOK, CursorListResponse{
+		Items:      agents,
+		NextCursor: nextCursor,
+	})
 }
 
 // Fragment handlers
@@ -77,32 +91,45 @@ func (s *Server) handleCreateFragment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if hub is at critical level - only known agents can create content
-	if s.hubStatus != nil && s.hubStatus.IsCritical() {
-		// Check if the creator agent is known
-		agentUUID := fragment.Creator.Entity
-		_, err := s.store.GetAgent(r.Context(), agentUUID)
-		if err != nil {
-			msg := "Hub at capacity. Unknown agents cannot create content."
-			if s.hubStatus.Hint != "" {
-				msg += " " + s.hubStatus.Hint
-			}
-			writeErrorWithStatus(w, http.StatusServiceUnavailable, msg, s.hubStatus)
-			return
-		}
-	}
-
 	if err := fragment.Validate(); err != nil {
 		handleError(w, err)
 		return
 	}
 
-	if err := s.store.CreateFragment(r.Context(), &fragment); err != nil {
+	// Verify signature
+	agent, err := s.store.GetAgent(r.Context(), fragment.Creator.Entity)
+	if err != nil {
 		handleError(w, err)
 		return
 	}
+	if err := crypto.VerifyFragment(&fragment, agent.PublicKey); err != nil {
+		writeError(w, http.StatusBadRequest, "signature verification failed: "+err.Error())
+		return
+	}
 
-	writeJSONWithStatus(w, http.StatusCreated, fragment, s.hubStatus)
+	// Check project visibility for hub sync
+	projectUUID := r.Header.Get("X-Wisdom-Project")
+	if s.syncer != nil && s.syncer.ShouldSync(r.Context(), projectUUID) {
+		// PUBLIC: Hub-first (synchronous)
+		if err := s.syncer.EnsureAgent(r.Context(), fragment.Creator.Entity); err != nil {
+			log.Printf("Warning: failed to ensure agent on hub: %v", err)
+		}
+		hubFragment, err := s.syncer.Client().PushFragment(r.Context(), &fragment)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "hub sync failed: "+err.Error())
+			return
+		}
+		// Store locally with hub addresses
+		s.store.CreateFragment(r.Context(), hubFragment)
+		writeJSONWithStatus(w, http.StatusCreated, hubFragment, s.hubStatus)
+	} else {
+		// PRIVATE: Store locally
+		if err := s.store.CreateFragment(r.Context(), &fragment); err != nil {
+			handleError(w, err)
+			return
+		}
+		writeJSONWithStatus(w, http.StatusCreated, fragment, s.hubStatus)
+	}
 }
 
 func (s *Server) handleGetFragmentByUUID(w http.ResponseWriter, r *http.Request, uuid string) {
@@ -119,6 +146,7 @@ func (s *Server) handleListFragments(w http.ResponseWriter, r *http.Request) {
 		ListOptions: store.ListOptions{
 			Limit:  parseIntParam(r, "limit", 100),
 			Offset: parseIntParam(r, "offset", 0),
+			Cursor: r.URL.Query().Get("cursor"),
 		},
 	}
 
@@ -127,7 +155,17 @@ func (s *Server) handleListFragments(w http.ResponseWriter, r *http.Request) {
 		handleError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, fragments)
+
+	// Determine next cursor
+	var nextCursor string
+	if len(fragments) == opts.Limit && len(fragments) > 0 {
+		nextCursor = fragments[len(fragments)-1].UUID
+	}
+
+	writeJSON(w, http.StatusOK, CursorListResponse{
+		Items:      fragments,
+		NextCursor: nextCursor,
+	})
 }
 
 // Relation handlers
@@ -144,12 +182,37 @@ func (s *Server) handleCreateRelation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateRelation(r.Context(), &relation); err != nil {
+	// Verify signature
+	agent, err := s.store.GetAgent(r.Context(), relation.Creator.Entity)
+	if err != nil {
 		handleError(w, err)
 		return
 	}
+	if err := crypto.VerifyRelation(&relation, agent.PublicKey); err != nil {
+		writeError(w, http.StatusBadRequest, "signature verification failed: "+err.Error())
+		return
+	}
 
-	writeJSON(w, http.StatusCreated, relation)
+	// Check project visibility for hub sync
+	projectUUID := r.Header.Get("X-Wisdom-Project")
+	if s.syncer != nil && s.syncer.ShouldSync(r.Context(), projectUUID) {
+		if err := s.syncer.EnsureAgent(r.Context(), relation.Creator.Entity); err != nil {
+			log.Printf("Warning: failed to ensure agent on hub: %v", err)
+		}
+		hubRelation, err := s.syncer.Client().PushRelation(r.Context(), &relation)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "hub sync failed: "+err.Error())
+			return
+		}
+		s.store.CreateRelation(r.Context(), hubRelation)
+		writeJSON(w, http.StatusCreated, hubRelation)
+	} else {
+		if err := s.store.CreateRelation(r.Context(), &relation); err != nil {
+			handleError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, relation)
+	}
 }
 
 func (s *Server) handleGetRelationByUUID(w http.ResponseWriter, r *http.Request, uuid string) {
@@ -166,6 +229,7 @@ func (s *Server) handleListRelations(w http.ResponseWriter, r *http.Request) {
 		ListOptions: store.ListOptions{
 			Limit:  parseIntParam(r, "limit", 100),
 			Offset: parseIntParam(r, "offset", 0),
+			Cursor: r.URL.Query().Get("cursor"),
 		},
 		Type: models.RelationType(r.URL.Query().Get("type")),
 	}
@@ -175,7 +239,17 @@ func (s *Server) handleListRelations(w http.ResponseWriter, r *http.Request) {
 		handleError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, relations)
+
+	// Determine next cursor
+	var nextCursor string
+	if len(relations) == opts.Limit && len(relations) > 0 {
+		nextCursor = relations[len(relations)-1].UUID
+	}
+
+	writeJSON(w, http.StatusOK, CursorListResponse{
+		Items:      relations,
+		NextCursor: nextCursor,
+	})
 }
 
 func (s *Server) handleGetEntityRelations(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +277,31 @@ func (s *Server) handleCreateTag(w http.ResponseWriter, r *http.Request) {
 	if err := tag.Validate(); err != nil {
 		handleError(w, err)
 		return
+	}
+
+	// Verify signature
+	agent, err := s.store.GetAgent(r.Context(), tag.Creator.Entity)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	if err := crypto.VerifyTag(&tag, agent.PublicKey); err != nil {
+		writeError(w, http.StatusBadRequest, "signature verification failed: "+err.Error())
+		return
+	}
+
+	// Tags are always synced (infrastructure)
+	if s.syncer != nil {
+		if err := s.syncer.EnsureAgent(r.Context(), tag.Creator.Entity); err != nil {
+			log.Printf("Warning: failed to ensure agent on hub: %v", err)
+		}
+		hubTag, err := s.syncer.SyncTag(r.Context(), &tag)
+		if err != nil {
+			log.Printf("Warning: failed to sync tag to hub: %v", err)
+			// Continue with local storage even if hub sync fails
+		} else {
+			tag = *hubTag
+		}
 	}
 
 	if err := s.store.CreateTag(r.Context(), &tag); err != nil {
@@ -236,6 +335,7 @@ func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request) {
 		ListOptions: store.ListOptions{
 			Limit:  parseIntParam(r, "limit", 100),
 			Offset: parseIntParam(r, "offset", 0),
+			Cursor: r.URL.Query().Get("cursor"),
 		},
 		Category: models.TagCategory(r.URL.Query().Get("category")),
 		Search:   r.URL.Query().Get("search"),
@@ -246,7 +346,17 @@ func (s *Server) handleListTags(w http.ResponseWriter, r *http.Request) {
 		handleError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, tags)
+
+	// Determine next cursor
+	var nextCursor string
+	if len(tags) == opts.Limit && len(tags) > 0 {
+		nextCursor = tags[len(tags)-1].UUID
+	}
+
+	writeJSON(w, http.StatusOK, CursorListResponse{
+		Items:      tags,
+		NextCursor: nextCursor,
+	})
 }
 
 // Transform handlers
@@ -263,12 +373,37 @@ func (s *Server) handleCreateTransform(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateTransform(r.Context(), &transform); err != nil {
+	// Verify signature
+	agent, err := s.store.GetAgent(r.Context(), transform.Agent.Entity)
+	if err != nil {
 		handleError(w, err)
 		return
 	}
+	if err := crypto.VerifyTransform(&transform, agent.PublicKey); err != nil {
+		writeError(w, http.StatusBadRequest, "signature verification failed: "+err.Error())
+		return
+	}
 
-	writeJSON(w, http.StatusCreated, transform)
+	// Check project visibility for hub sync
+	projectUUID := r.Header.Get("X-Wisdom-Project")
+	if s.syncer != nil && s.syncer.ShouldSync(r.Context(), projectUUID) {
+		if err := s.syncer.EnsureAgent(r.Context(), transform.Agent.Entity); err != nil {
+			log.Printf("Warning: failed to ensure agent on hub: %v", err)
+		}
+		hubTransform, err := s.syncer.Client().PushTransform(r.Context(), &transform)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "hub sync failed: "+err.Error())
+			return
+		}
+		s.store.CreateTransform(r.Context(), hubTransform)
+		writeJSON(w, http.StatusCreated, hubTransform)
+	} else {
+		if err := s.store.CreateTransform(r.Context(), &transform); err != nil {
+			handleError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, transform)
+	}
 }
 
 func (s *Server) handleGetTransformByUUID(w http.ResponseWriter, r *http.Request, uuid string) {
@@ -284,6 +419,7 @@ func (s *Server) handleListTransforms(w http.ResponseWriter, r *http.Request) {
 	opts := store.ListOptions{
 		Limit:  parseIntParam(r, "limit", 100),
 		Offset: parseIntParam(r, "offset", 0),
+		Cursor: r.URL.Query().Get("cursor"),
 	}
 
 	transforms, err := s.store.ListTransforms(r.Context(), opts)
@@ -291,7 +427,17 @@ func (s *Server) handleListTransforms(w http.ResponseWriter, r *http.Request) {
 		handleError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, transforms)
+
+	// Determine next cursor
+	var nextCursor string
+	if len(transforms) == opts.Limit && len(transforms) > 0 {
+		nextCursor = transforms[len(transforms)-1].UUID
+	}
+
+	writeJSON(w, http.StatusOK, CursorListResponse{
+		Items:      transforms,
+		NextCursor: nextCursor,
+	})
 }
 
 // Auth handlers
@@ -518,7 +664,17 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		handleError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
+
+	// Determine next cursor
+	var nextCursor string
+	if len(projects) > 0 {
+		nextCursor = projects[len(projects)-1].ID
+	}
+
+	writeJSON(w, http.StatusOK, CursorListResponse{
+		Items:      projects,
+		NextCursor: nextCursor,
+	})
 }
 
 // Helper functions

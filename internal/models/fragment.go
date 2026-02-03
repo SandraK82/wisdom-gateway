@@ -30,15 +30,19 @@ func (e EvidenceType) IsValid() bool {
 // Fragment represents a piece of knowledge in the Shared-Wisdom network.
 // Fragments are minimal - typing and state are expressed through Relations.
 type Fragment struct {
-	UUID      string    `json:"uuid"`
-	Tags      []Address `json:"tags"`      // References to Tag entities
-	Transform Address   `json:"transform"` // Reference to Transform entity
-	Content   string    `json:"content"`   // The actual content
+	UUID         string       `json:"uuid"`
+	Tags         []Address    `json:"tags"`          // References to Tag entities
+	Transform    Address      `json:"transform"`     // Reference to Transform entity (required)
+	Content      string       `json:"content"`       // The actual content
+	ContentHash  string       `json:"content_hash"`  // SHA-256 hash of content
 	Creator      Address      `json:"creator"`       // Agent who created this fragment
-	When         time.Time    `json:"when"`          // Creation timestamp
+	Version      uint32       `json:"version"`       // Incremented on updates
+	When         time.Time    `json:"when"`          // Content timestamp
 	Signature    string       `json:"signature"`     // Signature over the fragment data
 	Confidence   float32      `json:"confidence"`    // Creator's confidence (0.0 to 1.0)
 	EvidenceType EvidenceType `json:"evidence_type"` // How the content was derived
+	CreatedAt    time.Time    `json:"created_at"`    // Database creation timestamp
+	UpdatedAt    time.Time    `json:"updated_at"`    // Database update timestamp
 }
 
 // Validate checks if the Fragment data is well-formed.
@@ -72,14 +76,15 @@ func (f *Fragment) Validate() error {
 		}
 	}
 	
-	// Validate transform address if set
-	if !f.Transform.IsEmpty() {
-		if err := f.Transform.Validate(); err != nil {
-			return NewValidationError("fragment", "invalid transform: %v", err)
-		}
-		if f.Transform.Domain != DomainTransformation {
-			return NewValidationError("fragment", "transform must have TRANSFORMATION domain")
-		}
+	// Validate transform address (required)
+	if f.Transform.IsEmpty() {
+		return NewValidationError("fragment", "transform is required")
+	}
+	if err := f.Transform.Validate(); err != nil {
+		return NewValidationError("fragment", "invalid transform: %v", err)
+	}
+	if f.Transform.Domain != DomainTransformation {
+		return NewValidationError("fragment", "transform must have TRANSFORMATION domain")
 	}
 	
 	return nil

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/thoughtracker/shared-wisdom/internal/hub"
 	"github.com/thoughtracker/shared-wisdom/internal/models"
 	"github.com/thoughtracker/shared-wisdom/internal/store"
 )
@@ -20,11 +21,13 @@ type Server struct {
 	router    *http.ServeMux
 	server    *http.Server
 	hubStatus *models.HubStatus // Cached status from the upstream hub
+	syncer    *hub.Syncer       // Hub syncer (nil if no hub configured)
 }
 
 // Config holds server configuration.
 type Config struct {
-	Addr string // Listen address (e.g., ":8080")
+	Addr   string // Listen address (e.g., ":8080")
+	HubURL string // Upstream hub URL
 }
 
 // NewServer creates a new API server.
@@ -32,6 +35,13 @@ func NewServer(s store.Store, cfg Config) *Server {
 	srv := &Server{
 		store:  s,
 		router: http.NewServeMux(),
+	}
+
+	// Initialize hub syncer if hub URL is configured
+	if cfg.HubURL != "" {
+		hubClient := hub.NewClient(cfg.HubURL)
+		srv.syncer = hub.NewSyncer(hubClient, s)
+		log.Printf("Hub sync enabled: %s (host: %s)", cfg.HubURL, hubClient.HubHost())
 	}
 
 	srv.setupRoutes()
@@ -64,6 +74,13 @@ type apiError struct {
 	Error   string `json:"error"`
 	Code    string `json:"code,omitempty"`
 	Details string `json:"details,omitempty"`
+}
+
+// CursorListResponse is the paginated response format for list endpoints.
+// This matches the wisdom-hub API format.
+type CursorListResponse struct {
+	Items      interface{} `json:"items"`
+	NextCursor string      `json:"next_cursor,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {

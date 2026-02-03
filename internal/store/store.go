@@ -62,9 +62,17 @@ type Store interface {
 }
 
 // ListOptions contains common pagination options.
+// Supports both offset-based (legacy) and cursor-based pagination.
 type ListOptions struct {
 	Limit  int
-	Offset int
+	Offset int    // Legacy offset-based pagination
+	Cursor string // Cursor-based pagination (UUID of last item)
+}
+
+// CursorResult wraps a list result with cursor information.
+type CursorResult[T any] struct {
+	Items      []T
+	NextCursor string
 }
 
 // FragmentListOptions contains options for listing fragments.

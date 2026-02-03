@@ -59,9 +59,15 @@ func (s *SQLiteStore) migrate() error {
 		tags_json TEXT,
 		transform_json TEXT,
 		content TEXT NOT NULL,
+		content_hash TEXT,
 		creator_json TEXT NOT NULL,
+		version INTEGER NOT NULL DEFAULT 1,
 		when_created TIMESTAMP NOT NULL,
-		signature TEXT NOT NULL
+		signature TEXT NOT NULL,
+		confidence REAL DEFAULT 0.5,
+		evidence_type TEXT DEFAULT 'unknown',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
 	-- Relations
@@ -73,8 +79,11 @@ func (s *SQLiteStore) migrate() error {
 		type TEXT NOT NULL,
 		content TEXT,
 		creator_json TEXT NOT NULL,
+		version INTEGER NOT NULL DEFAULT 1,
 		when_created TIMESTAMP NOT NULL,
-		signature TEXT NOT NULL
+		signature TEXT NOT NULL,
+		confidence REAL DEFAULT 0.5,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(type);
 	CREATE INDEX IF NOT EXISTS idx_relations_from ON relations(from_json);
@@ -87,7 +96,8 @@ func (s *SQLiteStore) migrate() error {
 		version INTEGER NOT NULL DEFAULT 1,
 		category TEXT NOT NULL,
 		creator_json TEXT NOT NULL,
-		signature TEXT NOT NULL
+		signature TEXT NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name ON tags(name);
 
@@ -102,7 +112,8 @@ func (s *SQLiteStore) migrate() error {
 		additional_data TEXT,
 		agent_json TEXT NOT NULL,
 		version INTEGER NOT NULL DEFAULT 1,
-		signature TEXT NOT NULL
+		signature TEXT NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
 	-- Sessions (local)
@@ -133,6 +144,7 @@ func (s *SQLiteStore) migrate() error {
 		description TEXT,
 		agent_uuid TEXT NOT NULL,
 		tags_json TEXT,
+		visibility TEXT NOT NULL DEFAULT 'public',
 		created_at TIMESTAMP NOT NULL,
 		updated_at TIMESTAMP NOT NULL
 	);
@@ -140,7 +152,21 @@ func (s *SQLiteStore) migrate() error {
 	`
 
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migrations for existing databases
+	migrations := []string{
+		// Add visibility column to projects if it doesn't exist
+		`ALTER TABLE projects ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'`,
+	}
+	for _, m := range migrations {
+		// Ignore errors from already-applied migrations (e.g., "duplicate column")
+		s.db.Exec(m)
+	}
+
+	return nil
 }
 
 // Agent methods
@@ -151,15 +177,10 @@ func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *models.Agent) erro
 		return fmt.Errorf("failed to marshal trust: %w", err)
 	}
 
-	hubJSON, err := json.Marshal(agent.PrimaryHub)
-	if err != nil {
-		return fmt.Errorf("failed to marshal primary_hub: %w", err)
-	}
-
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO agents (uuid, public_key, version, description, trust_json, primary_hub_json, signature)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, agent.UUID, agent.PublicKey, agent.Version, agent.Description, string(trustJSON), string(hubJSON), agent.Signature)
+	`, agent.UUID, agent.PublicKey, agent.Version, agent.Description, string(trustJSON), agent.PrimaryHub, agent.Signature)
 
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -216,10 +237,11 @@ func (s *SQLiteStore) ListAgents(ctx context.Context, opts ListOptions) ([]*mode
 
 func (s *SQLiteStore) scanAgent(row *sql.Row) (*models.Agent, error) {
 	var agent models.Agent
-	var trustJSON, hubJSON sql.NullString
+	var trustJSON sql.NullString
+	var hubStr sql.NullString
 
 	err := row.Scan(&agent.UUID, &agent.PublicKey, &agent.Version, &agent.Description,
-		&trustJSON, &hubJSON, &agent.Signature)
+		&trustJSON, &hubStr, &agent.Signature)
 	if err == sql.ErrNoRows {
 		return nil, models.NewNotFoundError("agent", "")
 	}
@@ -233,10 +255,8 @@ func (s *SQLiteStore) scanAgent(row *sql.Row) (*models.Agent, error) {
 		}
 	}
 
-	if hubJSON.Valid {
-		if err := json.Unmarshal([]byte(hubJSON.String), &agent.PrimaryHub); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal primary_hub: %w", err)
-		}
+	if hubStr.Valid {
+		agent.PrimaryHub = hubStr.String
 	}
 
 	return &agent, nil
@@ -244,10 +264,11 @@ func (s *SQLiteStore) scanAgent(row *sql.Row) (*models.Agent, error) {
 
 func (s *SQLiteStore) scanAgentRow(rows *sql.Rows) (*models.Agent, error) {
 	var agent models.Agent
-	var trustJSON, hubJSON sql.NullString
+	var trustJSON sql.NullString
+	var hubStr sql.NullString
 
 	err := rows.Scan(&agent.UUID, &agent.PublicKey, &agent.Version, &agent.Description,
-		&trustJSON, &hubJSON, &agent.Signature)
+		&trustJSON, &hubStr, &agent.Signature)
 	if err != nil {
 		return nil, err
 	}
@@ -258,10 +279,8 @@ func (s *SQLiteStore) scanAgentRow(rows *sql.Rows) (*models.Agent, error) {
 		}
 	}
 
-	if hubJSON.Valid {
-		if err := json.Unmarshal([]byte(hubJSON.String), &agent.PrimaryHub); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal primary_hub: %w", err)
-		}
+	if hubStr.Valid {
+		agent.PrimaryHub = hubStr.String
 	}
 
 	return &agent, nil
@@ -285,11 +304,19 @@ func (s *SQLiteStore) CreateFragment(ctx context.Context, fragment *models.Fragm
 		return fmt.Errorf("failed to marshal creator: %w", err)
 	}
 
+	// Set defaults for version and timestamps
+	version := fragment.Version
+	if version == 0 {
+		version = 1
+	}
+	now := time.Now()
+
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO fragments (uuid, tags_json, transform_json, content, creator_json, when_created, signature)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO fragments (uuid, tags_json, transform_json, content, content_hash, creator_json, version, when_created, signature, confidence, evidence_type, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, fragment.UUID, string(tagsJSON), string(transformJSON), fragment.Content,
-		string(creatorJSON), fragment.When, fragment.Signature)
+		fragment.ContentHash, string(creatorJSON), version, fragment.When, fragment.Signature,
+		fragment.Confidence, fragment.EvidenceType, now, now)
 
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -302,16 +329,18 @@ func (s *SQLiteStore) CreateFragment(ctx context.Context, fragment *models.Fragm
 
 func (s *SQLiteStore) GetFragment(ctx context.Context, uuid string) (*models.Fragment, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT uuid, tags_json, transform_json, content, creator_json, when_created, signature
+		SELECT uuid, tags_json, transform_json, content, content_hash, creator_json, version, when_created, signature, confidence, evidence_type, created_at, updated_at
 		FROM fragments WHERE uuid = ?
 	`, uuid)
 
 	var fragment models.Fragment
 	var tagsJSON, transformJSON, creatorJSON string
-	var whenCreated time.Time
+	var contentHash, evidenceType sql.NullString
+	var whenCreated, createdAt, updatedAt time.Time
 
 	err := row.Scan(&fragment.UUID, &tagsJSON, &transformJSON, &fragment.Content,
-		&creatorJSON, &whenCreated, &fragment.Signature)
+		&contentHash, &creatorJSON, &fragment.Version, &whenCreated, &fragment.Signature,
+		&fragment.Confidence, &evidenceType, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, models.NewNotFoundError("fragment", uuid)
 	}
@@ -320,6 +349,14 @@ func (s *SQLiteStore) GetFragment(ctx context.Context, uuid string) (*models.Fra
 	}
 
 	fragment.When = whenCreated
+	fragment.CreatedAt = createdAt
+	fragment.UpdatedAt = updatedAt
+	if contentHash.Valid {
+		fragment.ContentHash = contentHash.String
+	}
+	if evidenceType.Valid {
+		fragment.EvidenceType = models.EvidenceType(evidenceType.String)
+	}
 
 	if err := json.Unmarshal([]byte(tagsJSON), &fragment.Tags); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal tags: %w", err)
@@ -342,7 +379,7 @@ func (s *SQLiteStore) ListFragments(ctx context.Context, opts FragmentListOption
 
 	// Simple implementation - can be extended with filters
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT uuid, tags_json, transform_json, content, creator_json, when_created, signature
+		SELECT uuid, tags_json, transform_json, content, content_hash, creator_json, version, when_created, signature, confidence, evidence_type, created_at, updated_at
 		FROM fragments ORDER BY when_created DESC LIMIT ? OFFSET ?
 	`, limit, opts.Offset)
 	if err != nil {
@@ -354,15 +391,25 @@ func (s *SQLiteStore) ListFragments(ctx context.Context, opts FragmentListOption
 	for rows.Next() {
 		var fragment models.Fragment
 		var tagsJSON, transformJSON, creatorJSON string
-		var whenCreated time.Time
+		var contentHash, evidenceType sql.NullString
+		var whenCreated, createdAt, updatedAt time.Time
 
 		err := rows.Scan(&fragment.UUID, &tagsJSON, &transformJSON, &fragment.Content,
-			&creatorJSON, &whenCreated, &fragment.Signature)
+			&contentHash, &creatorJSON, &fragment.Version, &whenCreated, &fragment.Signature,
+			&fragment.Confidence, &evidenceType, &createdAt, &updatedAt)
 		if err != nil {
 			return nil, err
 		}
 
 		fragment.When = whenCreated
+		fragment.CreatedAt = createdAt
+		fragment.UpdatedAt = updatedAt
+		if contentHash.Valid {
+			fragment.ContentHash = contentHash.String
+		}
+		if evidenceType.Valid {
+			fragment.EvidenceType = models.EvidenceType(evidenceType.String)
+		}
 
 		if err := json.Unmarshal([]byte(tagsJSON), &fragment.Tags); err != nil {
 			return nil, err
@@ -402,11 +449,19 @@ func (s *SQLiteStore) CreateRelation(ctx context.Context, relation *models.Relat
 		return fmt.Errorf("failed to marshal creator: %w", err)
 	}
 
+	// Set defaults for version and timestamps
+	version := relation.Version
+	if version == 0 {
+		version = 1
+	}
+	now := time.Now()
+
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO relations (uuid, from_json, to_json, by_json, type, content, creator_json, when_created, signature)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO relations (uuid, from_json, to_json, by_json, type, content, creator_json, version, when_created, signature, confidence, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, relation.UUID, string(fromJSON), string(toJSON), string(byJSON),
-		relation.Type, relation.Content, string(creatorJSON), relation.When, relation.Signature)
+		relation.Type, relation.Content, string(creatorJSON), version, relation.When, relation.Signature,
+		relation.Confidence, now)
 
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -419,7 +474,7 @@ func (s *SQLiteStore) CreateRelation(ctx context.Context, relation *models.Relat
 
 func (s *SQLiteStore) GetRelation(ctx context.Context, uuid string) (*models.Relation, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT uuid, from_json, to_json, by_json, type, content, creator_json, when_created, signature
+		SELECT uuid, from_json, to_json, by_json, type, content, creator_json, version, when_created, signature, confidence, created_at
 		FROM relations WHERE uuid = ?
 	`, uuid)
 
@@ -430,10 +485,11 @@ func (s *SQLiteStore) scanRelation(row *sql.Row) (*models.Relation, error) {
 	var relation models.Relation
 	var fromJSON, toJSON, byJSON, creatorJSON string
 	var content sql.NullString
-	var whenCreated time.Time
+	var whenCreated, createdAt time.Time
 
 	err := row.Scan(&relation.UUID, &fromJSON, &toJSON, &byJSON,
-		&relation.Type, &content, &creatorJSON, &whenCreated, &relation.Signature)
+		&relation.Type, &content, &creatorJSON, &relation.Version, &whenCreated, &relation.Signature,
+		&relation.Confidence, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, models.NewNotFoundError("relation", "")
 	}
@@ -442,6 +498,7 @@ func (s *SQLiteStore) scanRelation(row *sql.Row) (*models.Relation, error) {
 	}
 
 	relation.When = whenCreated
+	relation.CreatedAt = createdAt
 	if content.Valid {
 		relation.Content = content.String
 	}
@@ -468,7 +525,7 @@ func (s *SQLiteStore) ListRelations(ctx context.Context, opts RelationListOption
 		limit = 100
 	}
 
-	query := `SELECT uuid, from_json, to_json, by_json, type, content, creator_json, when_created, signature FROM relations`
+	query := `SELECT uuid, from_json, to_json, by_json, type, content, creator_json, version, when_created, signature, confidence, created_at FROM relations`
 	var conditions []string
 	var args []interface{}
 
@@ -495,15 +552,17 @@ func (s *SQLiteStore) ListRelations(ctx context.Context, opts RelationListOption
 		var relation models.Relation
 		var fromJSON, toJSON, byJSON, creatorJSON string
 		var content sql.NullString
-		var whenCreated time.Time
+		var whenCreated, createdAt time.Time
 
 		err := rows.Scan(&relation.UUID, &fromJSON, &toJSON, &byJSON,
-			&relation.Type, &content, &creatorJSON, &whenCreated, &relation.Signature)
+			&relation.Type, &content, &creatorJSON, &relation.Version, &whenCreated, &relation.Signature,
+			&relation.Confidence, &createdAt)
 		if err != nil {
 			return nil, err
 		}
 
 		relation.When = whenCreated
+		relation.CreatedAt = createdAt
 		if content.Valid {
 			relation.Content = content.String
 		}
@@ -520,8 +579,8 @@ func (s *SQLiteStore) ListRelations(ctx context.Context, opts RelationListOption
 
 func (s *SQLiteStore) GetRelationsForEntity(ctx context.Context, entityAddr string) ([]*models.Relation, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT uuid, from_json, to_json, by_json, type, content, creator_json, when_created, signature
-		FROM relations 
+		SELECT uuid, from_json, to_json, by_json, type, content, creator_json, version, when_created, signature, confidence, created_at
+		FROM relations
 		WHERE from_json LIKE ? OR to_json LIKE ?
 		ORDER BY when_created DESC
 	`, "%"+entityAddr+"%", "%"+entityAddr+"%")
@@ -535,15 +594,17 @@ func (s *SQLiteStore) GetRelationsForEntity(ctx context.Context, entityAddr stri
 		var relation models.Relation
 		var fromJSON, toJSON, byJSON, creatorJSON string
 		var content sql.NullString
-		var whenCreated time.Time
+		var whenCreated, createdAt time.Time
 
 		err := rows.Scan(&relation.UUID, &fromJSON, &toJSON, &byJSON,
-			&relation.Type, &content, &creatorJSON, &whenCreated, &relation.Signature)
+			&relation.Type, &content, &creatorJSON, &relation.Version, &whenCreated, &relation.Signature,
+			&relation.Confidence, &createdAt)
 		if err != nil {
 			return nil, err
 		}
 
 		relation.When = whenCreated
+		relation.CreatedAt = createdAt
 		if content.Valid {
 			relation.Content = content.String
 		}
@@ -566,10 +627,17 @@ func (s *SQLiteStore) CreateTag(ctx context.Context, tag *models.Tag) error {
 		return fmt.Errorf("failed to marshal creator: %w", err)
 	}
 
+	// Set defaults
+	version := tag.Version
+	if version == 0 {
+		version = 1
+	}
+	now := time.Now()
+
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO tags (uuid, name, content, version, category, creator_json, signature)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, tag.UUID, tag.Name, tag.Content, tag.Version, tag.Category, string(creatorJSON), tag.Signature)
+		INSERT INTO tags (uuid, name, content, version, category, creator_json, signature, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, tag.UUID, tag.Name, tag.Content, version, tag.Category, string(creatorJSON), tag.Signature, now)
 
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -582,7 +650,7 @@ func (s *SQLiteStore) CreateTag(ctx context.Context, tag *models.Tag) error {
 
 func (s *SQLiteStore) GetTag(ctx context.Context, uuid string) (*models.Tag, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT uuid, name, content, version, category, creator_json, signature
+		SELECT uuid, name, content, version, category, creator_json, signature, created_at
 		FROM tags WHERE uuid = ?
 	`, uuid)
 
@@ -591,7 +659,7 @@ func (s *SQLiteStore) GetTag(ctx context.Context, uuid string) (*models.Tag, err
 
 func (s *SQLiteStore) GetTagByName(ctx context.Context, name string) (*models.Tag, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT uuid, name, content, version, category, creator_json, signature
+		SELECT uuid, name, content, version, category, creator_json, signature, created_at
 		FROM tags WHERE name = ?
 	`, name)
 
@@ -602,8 +670,9 @@ func (s *SQLiteStore) scanTag(row *sql.Row) (*models.Tag, error) {
 	var tag models.Tag
 	var creatorJSON string
 	var content sql.NullString
+	var createdAt time.Time
 
-	err := row.Scan(&tag.UUID, &tag.Name, &content, &tag.Version, &tag.Category, &creatorJSON, &tag.Signature)
+	err := row.Scan(&tag.UUID, &tag.Name, &content, &tag.Version, &tag.Category, &creatorJSON, &tag.Signature, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, models.NewNotFoundError("tag", "")
 	}
@@ -611,6 +680,7 @@ func (s *SQLiteStore) scanTag(row *sql.Row) (*models.Tag, error) {
 		return nil, err
 	}
 
+	tag.CreatedAt = createdAt
 	if content.Valid {
 		tag.Content = content.String
 	}
@@ -628,7 +698,7 @@ func (s *SQLiteStore) ListTags(ctx context.Context, opts TagListOptions) ([]*mod
 		limit = 100
 	}
 
-	query := `SELECT uuid, name, content, version, category, creator_json, signature FROM tags`
+	query := `SELECT uuid, name, content, version, category, creator_json, signature, created_at FROM tags`
 	var conditions []string
 	var args []interface{}
 
@@ -660,12 +730,14 @@ func (s *SQLiteStore) ListTags(ctx context.Context, opts TagListOptions) ([]*mod
 		var tag models.Tag
 		var creatorJSON string
 		var content sql.NullString
+		var createdAt time.Time
 
-		err := rows.Scan(&tag.UUID, &tag.Name, &content, &tag.Version, &tag.Category, &creatorJSON, &tag.Signature)
+		err := rows.Scan(&tag.UUID, &tag.Name, &content, &tag.Version, &tag.Category, &creatorJSON, &tag.Signature, &createdAt)
 		if err != nil {
 			return nil, err
 		}
 
+		tag.CreatedAt = createdAt
 		if content.Valid {
 			tag.Content = content.String
 		}
@@ -689,12 +761,19 @@ func (s *SQLiteStore) CreateTransform(ctx context.Context, transform *models.Tra
 		return fmt.Errorf("failed to marshal agent: %w", err)
 	}
 
+	// Set defaults
+	version := transform.Version
+	if version == 0 {
+		version = 1
+	}
+	now := time.Now()
+
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO transforms (uuid, name, description, tags_json, transform_to, transform_from, additional_data, agent_json, version, signature)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO transforms (uuid, name, description, tags_json, transform_to, transform_from, additional_data, agent_json, version, signature, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, transform.UUID, transform.Name, transform.Description, string(tagsJSON),
 		transform.TransformTo, transform.TransformFrom, transform.AdditionalData,
-		string(agentJSON), transform.Version, transform.Signature)
+		string(agentJSON), version, transform.Signature, now)
 
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -707,17 +786,18 @@ func (s *SQLiteStore) CreateTransform(ctx context.Context, transform *models.Tra
 
 func (s *SQLiteStore) GetTransform(ctx context.Context, uuid string) (*models.Transform, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT uuid, name, description, tags_json, transform_to, transform_from, additional_data, agent_json, version, signature
+		SELECT uuid, name, description, tags_json, transform_to, transform_from, additional_data, agent_json, version, signature, created_at
 		FROM transforms WHERE uuid = ?
 	`, uuid)
 
 	var transform models.Transform
 	var tagsJSON, agentJSON string
 	var description, additionalData sql.NullString
+	var createdAt time.Time
 
 	err := row.Scan(&transform.UUID, &transform.Name, &description, &tagsJSON,
 		&transform.TransformTo, &transform.TransformFrom, &additionalData,
-		&agentJSON, &transform.Version, &transform.Signature)
+		&agentJSON, &transform.Version, &transform.Signature, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, models.NewNotFoundError("transform", uuid)
 	}
@@ -725,6 +805,7 @@ func (s *SQLiteStore) GetTransform(ctx context.Context, uuid string) (*models.Tr
 		return nil, err
 	}
 
+	transform.CreatedAt = createdAt
 	if description.Valid {
 		transform.Description = description.String
 	}
@@ -749,7 +830,7 @@ func (s *SQLiteStore) ListTransforms(ctx context.Context, opts ListOptions) ([]*
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT uuid, name, description, tags_json, transform_to, transform_from, additional_data, agent_json, version, signature
+		SELECT uuid, name, description, tags_json, transform_to, transform_from, additional_data, agent_json, version, signature, created_at
 		FROM transforms ORDER BY name LIMIT ? OFFSET ?
 	`, limit, opts.Offset)
 	if err != nil {
@@ -762,14 +843,16 @@ func (s *SQLiteStore) ListTransforms(ctx context.Context, opts ListOptions) ([]*
 		var transform models.Transform
 		var tagsJSON, agentJSON string
 		var description, additionalData sql.NullString
+		var createdAt time.Time
 
 		err := rows.Scan(&transform.UUID, &transform.Name, &description, &tagsJSON,
 			&transform.TransformTo, &transform.TransformFrom, &additionalData,
-			&agentJSON, &transform.Version, &transform.Signature)
+			&agentJSON, &transform.Version, &transform.Signature, &createdAt)
 		if err != nil {
 			return nil, err
 		}
 
+		transform.CreatedAt = createdAt
 		if description.Valid {
 			transform.Description = description.String
 		}
@@ -886,24 +969,30 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, project *models.Project
 		return fmt.Errorf("failed to marshal tags: %w", err)
 	}
 
+	visibility := project.Visibility
+	if visibility == "" {
+		visibility = models.VisibilityPublic
+	}
+
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO projects (id, name, description, agent_uuid, tags_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, project.ID, project.Name, project.Description, project.AgentUUID, string(tagsJSON), project.CreatedAt, project.UpdatedAt)
+		INSERT INTO projects (id, name, description, agent_uuid, tags_json, visibility, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, project.ID, project.Name, project.Description, project.AgentUUID, string(tagsJSON), string(visibility), project.CreatedAt, project.UpdatedAt)
 	return err
 }
 
 func (s *SQLiteStore) GetProject(ctx context.Context, id string) (*models.Project, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, name, description, agent_uuid, tags_json, created_at, updated_at
+		SELECT id, name, description, agent_uuid, tags_json, visibility, created_at, updated_at
 		FROM projects WHERE id = ?
 	`, id)
 
 	var project models.Project
 	var tagsJSON string
 	var description sql.NullString
+	var visibility string
 
-	err := row.Scan(&project.ID, &project.Name, &description, &project.AgentUUID, &tagsJSON, &project.CreatedAt, &project.UpdatedAt)
+	err := row.Scan(&project.ID, &project.Name, &description, &project.AgentUUID, &tagsJSON, &visibility, &project.CreatedAt, &project.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, models.NewNotFoundError("project", id)
 	}
@@ -914,6 +1003,7 @@ func (s *SQLiteStore) GetProject(ctx context.Context, id string) (*models.Projec
 	if description.Valid {
 		project.Description = description.String
 	}
+	project.Visibility = models.Visibility(visibility)
 
 	if err := json.Unmarshal([]byte(tagsJSON), &project.Tags); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal tags: %w", err)
@@ -930,10 +1020,15 @@ func (s *SQLiteStore) UpdateProject(ctx context.Context, project *models.Project
 
 	project.UpdatedAt = time.Now()
 
+	visibility := project.Visibility
+	if visibility == "" {
+		visibility = models.VisibilityPublic
+	}
+
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE projects SET name = ?, description = ?, tags_json = ?, updated_at = ?
+		UPDATE projects SET name = ?, description = ?, tags_json = ?, visibility = ?, updated_at = ?
 		WHERE id = ?
-	`, project.Name, project.Description, string(tagsJSON), project.UpdatedAt, project.ID)
+	`, project.Name, project.Description, string(tagsJSON), string(visibility), project.UpdatedAt, project.ID)
 	if err != nil {
 		return err
 	}
@@ -951,7 +1046,7 @@ func (s *SQLiteStore) DeleteProject(ctx context.Context, id string) error {
 
 func (s *SQLiteStore) ListProjects(ctx context.Context, agentUUID string) ([]*models.Project, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, description, agent_uuid, tags_json, created_at, updated_at
+		SELECT id, name, description, agent_uuid, tags_json, visibility, created_at, updated_at
 		FROM projects WHERE agent_uuid = ? ORDER BY name
 	`, agentUUID)
 	if err != nil {
@@ -964,8 +1059,9 @@ func (s *SQLiteStore) ListProjects(ctx context.Context, agentUUID string) ([]*mo
 		var project models.Project
 		var tagsJSON string
 		var description sql.NullString
+		var visibility string
 
-		err := rows.Scan(&project.ID, &project.Name, &description, &project.AgentUUID, &tagsJSON, &project.CreatedAt, &project.UpdatedAt)
+		err := rows.Scan(&project.ID, &project.Name, &description, &project.AgentUUID, &tagsJSON, &visibility, &project.CreatedAt, &project.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -973,6 +1069,7 @@ func (s *SQLiteStore) ListProjects(ctx context.Context, agentUUID string) ([]*mo
 		if description.Valid {
 			project.Description = description.String
 		}
+		project.Visibility = models.Visibility(visibility)
 
 		json.Unmarshal([]byte(tagsJSON), &project.Tags)
 		projects = append(projects, &project)

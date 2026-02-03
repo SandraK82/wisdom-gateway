@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 // TagCategory classifies tags for better organization and filtering.
 type TagCategory string
 
@@ -26,6 +28,7 @@ type Tag struct {
 	Category  TagCategory `json:"category"`  // Classification category
 	Creator   Address     `json:"creator"`   // Agent who created this tag
 	Signature string      `json:"signature"` // Signature over the tag data
+	CreatedAt time.Time   `json:"created_at"` // Database creation timestamp
 }
 
 // Validate checks if the Tag data is well-formed.

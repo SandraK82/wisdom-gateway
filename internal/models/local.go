@@ -2,6 +2,16 @@ package models
 
 import "time"
 
+// Visibility indicates whether a project's data is synced to the hub.
+type Visibility string
+
+const (
+	// VisibilityPublic means data is synced to the hub.
+	VisibilityPublic Visibility = "public"
+	// VisibilityPrivate means data stays local.
+	VisibilityPrivate Visibility = "private"
+)
+
 // Session represents a Gateway-local authentication session.
 // Sessions are not federated - they exist only on the local gateway.
 type Session struct {
@@ -72,13 +82,14 @@ func (c *AuthChallenge) Validate() error {
 // Project represents a Gateway-local project context.
 // Projects help organize fragments and provide context for queries.
 type Project struct {
-	ID          string    `json:"id"`          // Project UUID
-	Name        string    `json:"name"`        // Human-readable name
-	Description string    `json:"description"` // Project description
-	AgentUUID   string    `json:"agent_uuid"`  // Owner agent
-	Tags        []string  `json:"tags"`        // Default tags (UUIDs)
-	CreatedAt   time.Time `json:"created_at"`  // Creation timestamp
-	UpdatedAt   time.Time `json:"updated_at"`  // Last update timestamp
+	ID          string     `json:"id"`          // Project UUID
+	Name        string     `json:"name"`        // Human-readable name
+	Description string     `json:"description"` // Project description
+	AgentUUID   string     `json:"agent_uuid"`  // Owner agent
+	Tags        []string   `json:"tags"`        // Default tags (UUIDs)
+	Visibility  Visibility `json:"visibility"`  // public or private
+	CreatedAt   time.Time  `json:"created_at"`  // Creation timestamp
+	UpdatedAt   time.Time  `json:"updated_at"`  // Last update timestamp
 }
 
 // Validate checks if the Project data is well-formed.

@@ -57,7 +57,7 @@ type Agent struct {
 	Version     uint32       `json:"version"`      // Incremented on updates
 	Description string       `json:"description"`  // Human-readable description
 	Trust       TrustStore   `json:"trust"`        // Embedded trust relationships for path finding
-	PrimaryHub  Address      `json:"primary_hub"`  // Where this agent's data primarily lives
+	PrimaryHub  string       `json:"primary_hub"`  // Where this agent's data primarily lives (string, not Address)
 	Signature   string       `json:"signature"`    // Signature over the agent data
 	Profile     AgentProfile `json:"profile"`      // Agent's expertise profile
 }
@@ -94,13 +94,6 @@ func (a *Agent) Validate() error {
 		}
 		if t.Trust < -1.0 || t.Trust > 1.0 {
 			return NewValidationError("agent", "trust[%d].trust must be between -1.0 and 1.0", i)
-		}
-	}
-	
-	// Validate primary hub if set
-	if !a.PrimaryHub.IsEmpty() {
-		if err := a.PrimaryHub.Validate(); err != nil {
-			return NewValidationError("agent", "invalid primary_hub: %v", err)
 		}
 	}
 	
