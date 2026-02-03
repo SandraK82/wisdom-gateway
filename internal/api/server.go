@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/thoughtracker/shared-wisdom/internal/hub"
@@ -21,6 +22,7 @@ type Server struct {
 	router    *http.ServeMux
 	server    *http.Server
 	hubStatus *models.HubStatus // Cached status from the upstream hub
+	hubMu     sync.RWMutex      // Protects hubStatus
 	syncer    *hub.Syncer       // Hub syncer (nil if no hub configured)
 }
 
@@ -60,7 +62,27 @@ func NewServer(s store.Store, cfg Config) *Server {
 // Start starts the server.
 func (s *Server) Start() error {
 	log.Printf("Starting server on %s", s.server.Addr)
+	go s.cleanupExpiredEntries()
 	return s.server.ListenAndServe()
+}
+
+// cleanupExpiredEntries periodically removes expired sessions and challenges.
+func (s *Server) cleanupExpiredEntries() {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx := context.Background()
+		if n, err := s.store.DeleteExpiredSessions(ctx); err != nil {
+			log.Printf("Error cleaning expired sessions: %v", err)
+		} else if n > 0 {
+			log.Printf("Cleaned %d expired sessions", n)
+		}
+		if n, err := s.store.DeleteExpiredChallenges(ctx); err != nil {
+			log.Printf("Error cleaning expired challenges: %v", err)
+		} else if n > 0 {
+			log.Printf("Cleaned %d expired challenges", n)
+		}
+	}
 }
 
 // Shutdown gracefully shuts down the server.
@@ -151,16 +173,23 @@ func parseJSON(r *http.Request, v interface{}) error {
 
 // SetHubStatus updates the cached hub status
 func (s *Server) SetHubStatus(status *models.HubStatus) {
+	s.hubMu.Lock()
+	defer s.hubMu.Unlock()
 	s.hubStatus = status
 }
 
 // GetHubStatus returns the cached hub status
 func (s *Server) GetHubStatus() *models.HubStatus {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
 	return s.hubStatus
 }
 
 // UpdateHubStatusFromResponse extracts hub status from an HTTP response
 func (s *Server) UpdateHubStatusFromResponse(headers http.Header) {
+	s.hubMu.Lock()
+	defer s.hubMu.Unlock()
+
 	statusHeader := headers.Get("X-Hub-Status")
 	if statusHeader == "" {
 		s.hubStatus = nil

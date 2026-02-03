@@ -194,7 +194,7 @@ func TestRelationCRUD(t *testing.T) {
 			Domain: models.DomainAgent,
 			Entity: "agent-1",
 		},
-		Type: models.RelationQuestion,
+		Type: models.RelationRelatedTo,
 		Creator: models.Address{
 			Domain: models.DomainAgent,
 			Entity: "agent-1",
@@ -209,7 +209,7 @@ func TestRelationCRUD(t *testing.T) {
 
 	// List by type
 	relations, err := store.ListRelations(ctx, RelationListOptions{
-		Type: models.RelationQuestion,
+		Type: models.RelationRelatedTo,
 	})
 	if err != nil {
 		t.Fatalf("ListRelations() error = %v", err)

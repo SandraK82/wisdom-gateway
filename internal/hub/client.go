@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,13 +74,59 @@ type hubResponse struct {
 	HubStatus string          `json:"hub_status,omitempty"`
 }
 
-// post sends a POST request to the hub and parses the response.
+// isRetryable returns true if the error or status code warrants a retry.
+func isRetryable(statusCode int, err error) bool {
+	if err != nil {
+		// Network errors, timeouts
+		return true
+	}
+	// Retry on 5xx and 429 (rate limit)
+	return statusCode >= 500 || statusCode == 429
+}
+
+// post sends a POST request to the hub with retry logic (max 3 attempts, exponential backoff).
 func (c *Client) post(ctx context.Context, path string, body interface{}, result interface{}) error {
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
+	const maxRetries = 3
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 500ms, 2s, 8s
+			backoff := time.Duration(1<<uint(attempt-1)*500) * time.Millisecond
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		lastErr = c.doPost(ctx, path, bodyJSON, result)
+		if lastErr == nil {
+			return nil
+		}
+
+		// Don't retry client errors (4xx except 429) or conflicts
+		var conflict *models.ConflictError
+		if errors.As(lastErr, &conflict) {
+			return lastErr
+		}
+
+		// Check if the error message indicates a non-retryable status
+		if strings.Contains(lastErr.Error(), "hub returned status 4") && !strings.Contains(lastErr.Error(), "status 429") {
+			return lastErr
+		}
+	}
+
+	return fmt.Errorf("hub request failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+// doPost executes a single POST request to the hub.
+func (c *Client) doPost(ctx context.Context, path string, bodyJSON []byte, result interface{}) error {
 	url := c.hubURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyJSON))
 	if err != nil {

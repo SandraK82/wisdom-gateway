@@ -31,18 +31,18 @@ func (s *Syncer) Client() *Client {
 // ShouldSync returns true if the project is public and should be synced.
 func (s *Syncer) ShouldSync(ctx context.Context, projectUUID string) bool {
 	if projectUUID == "" {
-		// No project specified — default to sync
-		return true
+		// No project specified — default to private (no sync)
+		return false
 	}
 
 	project, err := s.store.GetProject(ctx, projectUUID)
 	if err != nil {
-		// If project not found, default to sync
+		// If project not found, default to private (no sync)
 		log.Printf("Warning: could not get project %s for visibility check: %v", projectUUID, err)
-		return true
+		return false
 	}
 
-	return project.Visibility == models.VisibilityPublic || project.Visibility == ""
+	return project.Visibility == models.VisibilityPublic
 }
 
 // EnsureAgent ensures the agent is registered on the hub.

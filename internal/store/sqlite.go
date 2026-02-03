@@ -160,6 +160,11 @@ func (s *SQLiteStore) migrate() error {
 	migrations := []string{
 		// Add visibility column to projects if it doesn't exist
 		`ALTER TABLE projects ADD COLUMN visibility TEXT NOT NULL DEFAULT 'public'`,
+		// Add denormalized entity columns for fast relation lookups (avoids LIKE on JSON)
+		`ALTER TABLE relations ADD COLUMN from_entity TEXT`,
+		`ALTER TABLE relations ADD COLUMN to_entity TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_relations_from_entity ON relations(from_entity)`,
+		`CREATE INDEX IF NOT EXISTS idx_relations_to_entity ON relations(to_entity)`,
 	}
 	for _, m := range migrations {
 		// Ignore errors from already-applied migrations (e.g., "duplicate column")
@@ -457,11 +462,11 @@ func (s *SQLiteStore) CreateRelation(ctx context.Context, relation *models.Relat
 	now := time.Now()
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO relations (uuid, from_json, to_json, by_json, type, content, creator_json, version, when_created, signature, confidence, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO relations (uuid, from_json, to_json, by_json, type, content, creator_json, version, when_created, signature, confidence, created_at, from_entity, to_entity)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, relation.UUID, string(fromJSON), string(toJSON), string(byJSON),
 		relation.Type, relation.Content, string(creatorJSON), version, relation.When, relation.Signature,
-		relation.Confidence, now)
+		relation.Confidence, now, relation.From.Entity, relation.To.Entity)
 
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -567,10 +572,18 @@ func (s *SQLiteStore) ListRelations(ctx context.Context, opts RelationListOption
 			relation.Content = content.String
 		}
 
-		json.Unmarshal([]byte(fromJSON), &relation.From)
-		json.Unmarshal([]byte(toJSON), &relation.To)
-		json.Unmarshal([]byte(byJSON), &relation.By)
-		json.Unmarshal([]byte(creatorJSON), &relation.Creator)
+		if err := json.Unmarshal([]byte(fromJSON), &relation.From); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal from: %w", err)
+		}
+		if err := json.Unmarshal([]byte(toJSON), &relation.To); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal to: %w", err)
+		}
+		if err := json.Unmarshal([]byte(byJSON), &relation.By); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal by: %w", err)
+		}
+		if err := json.Unmarshal([]byte(creatorJSON), &relation.Creator); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal creator: %w", err)
+		}
 
 		relations = append(relations, &relation)
 	}
@@ -578,12 +591,13 @@ func (s *SQLiteStore) ListRelations(ctx context.Context, opts RelationListOption
 }
 
 func (s *SQLiteStore) GetRelationsForEntity(ctx context.Context, entityAddr string) ([]*models.Relation, error) {
+	// Use indexed from_entity/to_entity columns when available, fall back to LIKE on JSON
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT uuid, from_json, to_json, by_json, type, content, creator_json, version, when_created, signature, confidence, created_at
 		FROM relations
-		WHERE from_json LIKE ? OR to_json LIKE ?
+		WHERE from_entity = ? OR to_entity = ? OR from_json LIKE ? OR to_json LIKE ?
 		ORDER BY when_created DESC
-	`, "%"+entityAddr+"%", "%"+entityAddr+"%")
+	`, entityAddr, entityAddr, "%"+entityAddr+"%", "%"+entityAddr+"%")
 	if err != nil {
 		return nil, err
 	}
@@ -609,10 +623,18 @@ func (s *SQLiteStore) GetRelationsForEntity(ctx context.Context, entityAddr stri
 			relation.Content = content.String
 		}
 
-		json.Unmarshal([]byte(fromJSON), &relation.From)
-		json.Unmarshal([]byte(toJSON), &relation.To)
-		json.Unmarshal([]byte(byJSON), &relation.By)
-		json.Unmarshal([]byte(creatorJSON), &relation.Creator)
+		if err := json.Unmarshal([]byte(fromJSON), &relation.From); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal from: %w", err)
+		}
+		if err := json.Unmarshal([]byte(toJSON), &relation.To); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal to: %w", err)
+		}
+		if err := json.Unmarshal([]byte(byJSON), &relation.By); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal by: %w", err)
+		}
+		if err := json.Unmarshal([]byte(creatorJSON), &relation.Creator); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal creator: %w", err)
+		}
 
 		relations = append(relations, &relation)
 	}
@@ -742,7 +764,9 @@ func (s *SQLiteStore) ListTags(ctx context.Context, opts TagListOptions) ([]*mod
 			tag.Content = content.String
 		}
 
-		json.Unmarshal([]byte(creatorJSON), &tag.Creator)
+		if err := json.Unmarshal([]byte(creatorJSON), &tag.Creator); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal creator: %w", err)
+		}
 		tags = append(tags, &tag)
 	}
 	return tags, rows.Err()
@@ -860,8 +884,12 @@ func (s *SQLiteStore) ListTransforms(ctx context.Context, opts ListOptions) ([]*
 			transform.AdditionalData = additionalData.String
 		}
 
-		json.Unmarshal([]byte(tagsJSON), &transform.Tags)
-		json.Unmarshal([]byte(agentJSON), &transform.Agent)
+		if err := json.Unmarshal([]byte(tagsJSON), &transform.Tags); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal tags: %w", err)
+		}
+		if err := json.Unmarshal([]byte(agentJSON), &transform.Agent); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal agent: %w", err)
+		}
 		transforms = append(transforms, &transform)
 	}
 	return transforms, rows.Err()
@@ -1071,7 +1099,9 @@ func (s *SQLiteStore) ListProjects(ctx context.Context, agentUUID string) ([]*mo
 		}
 		project.Visibility = models.Visibility(visibility)
 
-		json.Unmarshal([]byte(tagsJSON), &project.Tags)
+		if err := json.Unmarshal([]byte(tagsJSON), &project.Tags); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal tags: %w", err)
+		}
 		projects = append(projects, &project)
 	}
 	return projects, rows.Err()

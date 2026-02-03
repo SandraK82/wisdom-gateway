@@ -45,7 +45,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSONWithStatus(w, http.StatusCreated, agent, s.hubStatus)
+	writeJSONWithStatus(w, http.StatusCreated, agent, s.GetHubStatus())
 }
 
 func (s *Server) handleGetAgentByUUID(w http.ResponseWriter, r *http.Request, uuid string) {
@@ -120,15 +120,19 @@ func (s *Server) handleCreateFragment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Store locally with hub addresses
-		s.store.CreateFragment(r.Context(), hubFragment)
-		writeJSONWithStatus(w, http.StatusCreated, hubFragment, s.hubStatus)
+		if err := s.store.CreateFragment(r.Context(), hubFragment); err != nil {
+			log.Printf("Error: hub-synced fragment stored on hub but failed locally: %v", err)
+			writeError(w, http.StatusInternalServerError, "fragment synced to hub but local storage failed")
+			return
+		}
+		writeJSONWithStatus(w, http.StatusCreated, hubFragment, s.GetHubStatus())
 	} else {
 		// PRIVATE: Store locally
 		if err := s.store.CreateFragment(r.Context(), &fragment); err != nil {
 			handleError(w, err)
 			return
 		}
-		writeJSONWithStatus(w, http.StatusCreated, fragment, s.hubStatus)
+		writeJSONWithStatus(w, http.StatusCreated, fragment, s.GetHubStatus())
 	}
 }
 
@@ -204,7 +208,11 @@ func (s *Server) handleCreateRelation(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "hub sync failed: "+err.Error())
 			return
 		}
-		s.store.CreateRelation(r.Context(), hubRelation)
+		if err := s.store.CreateRelation(r.Context(), hubRelation); err != nil {
+			log.Printf("Error: hub-synced relation stored on hub but failed locally: %v", err)
+			writeError(w, http.StatusInternalServerError, "relation synced to hub but local storage failed")
+			return
+		}
 		writeJSON(w, http.StatusCreated, hubRelation)
 	} else {
 		if err := s.store.CreateRelation(r.Context(), &relation); err != nil {
@@ -395,7 +403,11 @@ func (s *Server) handleCreateTransform(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "hub sync failed: "+err.Error())
 			return
 		}
-		s.store.CreateTransform(r.Context(), hubTransform)
+		if err := s.store.CreateTransform(r.Context(), hubTransform); err != nil {
+			log.Printf("Error: hub-synced transform stored on hub but failed locally: %v", err)
+			writeError(w, http.StatusInternalServerError, "transform synced to hub but local storage failed")
+			return
+		}
 		writeJSON(w, http.StatusCreated, hubTransform)
 	} else {
 		if err := s.store.CreateTransform(r.Context(), &transform); err != nil {
